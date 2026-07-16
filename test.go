@@ -11,9 +11,6 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"github.com/chinuy/zipf"
-	"github.com/panjf2000/ants"
-	"github.com/syndtr/goleveldb/leveldb"
 	"log"
 	"math"
 	"math/big"
@@ -23,6 +20,10 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/chinuy/zipf"
+	"github.com/panjf2000/ants"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 const dbFile1 = "DAG_CG"
@@ -54,6 +55,11 @@ func main() {
 	}
 	defer file.Close()
 	w := bufio.NewWriter(file)
+
+	// 在文件开头写入当前时间
+	w.WriteString(fmt.Sprintf("Test started at: %s\n", time.Now().Format(time.RFC3339)))
+	w.WriteString(fmt.Sprintf("===================================================\n"))
+	w.Flush()
 
 	TestSerialExecution(addrNum, txNum, skew, w)
 	TestConflictQueue(addrNum, txNum, skew, w, dbFile4)

@@ -78,8 +78,8 @@ func TestSimulation(addrNum uint64, txNum int, skew float64, writer *bufio.Write
 
 	selectFunc := []string{"almagate", "updateBalance", "updateSaving", "sendPayment", "writeCheck", "getBalance"}
 
-	abiObject, binData, err := tools.LoadContract("./SmallBank/smallbank_sol_SmallBank.abi",
-		"./SmallBank/smallbank_sol_SmallBank.bin")
+	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+		"./SmallBank/small_bank_sol_SmallBank.bin")
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -288,8 +288,8 @@ func TestSerialExecution(addrNum uint64, txNum int, skew float64, writer *bufio.
 	z := zipf.NewZipf(r, skew, addrNum)
 
 	fromAddr := tools.NewRandomAddress()
-	abiObject, binData, err := tools.LoadContract("./SmallBank/smallbank_sol_SmallBank.abi",
-		"./SmallBank/smallbank_sol_SmallBank.bin")
+	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+		"./SmallBank/small_bank_sol_SmallBank.bin")
 	if err != nil {
 		fmt.Println(err)
 	}

@@ -8,15 +8,62 @@ import (
 	"Nezha/evm/levm"
 	"Nezha/evm/levm/tools"
 	"fmt"
-	"github.com/chinuy/zipf"
-	"github.com/panjf2000/ants"
 	"math/big"
 	"math/rand"
 	"runtime"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/chinuy/zipf"
+	"github.com/panjf2000/ants"
 )
+
+// Transaction 表示一个预生成的交易
+type Transaction struct {
+	Function string // 函数名
+	Addr1    uint64 // 地址1
+	Addr2    uint64 // 地址2
+}
+
+// GenerateTransactions 预生成确定的交易序列
+func GenerateTransactions(addrNum uint64, txNum int, skew float64, seed int64) []Transaction {
+	var txs []Transaction
+
+	// 使用固定的随机种子确保结果可重复
+	r := rand.New(rand.NewSource(seed))
+	z := zipf.NewZipf(r, skew, addrNum)
+
+	selectFunc := []string{"almagate", "updateBalance", "updateSaving", "sendPayment", "writeCheck", "getBalance"}
+
+	for i := 0; i < txNum; i++ {
+		// 5% 只读交易，95% 写交易（与原 Nezha 一致）
+		random := r.Float32()
+		var function string
+		if random <= 0.05 {
+			function = selectFunc[5] // getBalance
+		} else {
+			random2 := r.Intn(5)
+			function = selectFunc[random2]
+		}
+
+		// 生成地址
+		addr1 := z.Uint64()
+		addr2 := z.Uint64()
+		// 确保 addr2 != addr1
+		for addr2 == addr1 {
+			addr2 = z.Uint64()
+		}
+
+		txs = append(txs, Transaction{
+			Function: function,
+			Addr1:    addr1,
+			Addr2:    addr2,
+		})
+	}
+
+	return txs
+}
 
 func txCollector(addrNum uint64, txNum int, skew float64) [][]*core.RWNode {
 	var txs [][]*core.RWNode
@@ -128,15 +175,19 @@ func CaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][]*c
 
 // ConCaptureRWSet capture read/write set in multiple threads
 func ConCaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][]*core.RWNode {
+	// 使用固定种子生成交易
+	txList := GenerateTransactions(addrNum, txNum, skew, 12345)
+	return ConCaptureRWSetWithTransactions(txList, dbFile)
+}
+
+// ConCaptureRWSetWithTransactions capture read/write set using pre-generated transactions
+func ConCaptureRWSetWithTransactions(txList []Transaction, dbFile string) [][]*core.RWNode {
 	var evmPools []*levm.LEVM
 	var fromAddress []common.Address
 	var cAddress []common.Address
 	var txs [][]*core.RWNode
 
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	z := zipf.NewZipf(r, skew, addrNum)
-
-	selectFunc := []string{"almagate", "updateBalance", "updateSaving", "sendPayment", "writeCheck", "getBalance"}
+	txNum := len(txList)
 
 	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
 		"./SmallBank/small_bank_sol_SmallBank.bin")
@@ -172,23 +223,9 @@ func ConCaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][
 		lvm := evmPools[n]
 		fromAddr := fromAddress[n]
 		addr := cAddress[n]
+		tx := txList[n]
 
-		rand.Seed(time.Now().UnixNano())
-		random := rand.Intn(4)
-
-		// read-write 50-50
-		var function string
-		if random == 0 {
-			function = selectFunc[5]
-		} else {
-			random2 := rand.Intn(5)
-			function = selectFunc[random2]
-		}
-
-		addr1 := z.Uint64()
-		addr2 := z.Uint64()
-
-		rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, function, addr1, addr2)
+		rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, tx.Function, tx.Addr1, tx.Addr2)
 
 		// generate r/w set
 		var rAddr [][]byte
@@ -226,7 +263,16 @@ func ConCaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][
 
 	wg.Wait()
 
-	return txs
+	// 按照交易顺序重新排序（因为并发执行可能导致顺序混乱）
+	sortedTxs := make([][]*core.RWNode, txNum)
+	for _, rwNode := range txs {
+		if len(rwNode) > 0 {
+			txID, _ := strconv.Atoi(rwNode[0].TransInfo.ID)
+			sortedTxs[txID] = rwNode
+		}
+	}
+
+	return sortedTxs
 }
 
 func SelectFunctions(lvm *levm.LEVM, fromAddr common.Address, cAddr common.Address, abiObject abi.ABI, funcName string,

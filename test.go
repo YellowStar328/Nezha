@@ -14,14 +14,12 @@ import (
 	"log"
 	"math"
 	"math/big"
-	"math/rand"
 	"os"
 	"runtime"
 	"sort"
 	"sync"
 	"time"
 
-	"github.com/chinuy/zipf"
 	"github.com/panjf2000/ants"
 	"github.com/syndtr/goleveldb/leveldb"
 )
@@ -49,6 +47,9 @@ func main() {
 
 	flag.Parse()
 
+	// 清理旧的数据库，确保每次测试从零开始
+	CleanupDatabases()
+
 	file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0666)
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
@@ -61,22 +62,34 @@ func main() {
 	w.WriteString(fmt.Sprintf("===================================================\n"))
 	w.Flush()
 
-	TestSerialExecution(addrNum, txNum, skew, w)
-	TestConflictQueue(addrNum, txNum, skew, w, dbFile4)
-	TestConflictGraph(addrNum, txNum, skew, w, dbFile4)
-	TestSimulation(addrNum, txNum, skew, w)
+	// 预生成确定的交易序列，使用固定种子
+	txList := utils.GenerateTransactions(addrNum, txNum, skew, 12345)
+
+	TestSerialExecution(txList, w)
+	TestConflictQueue(txList, w, dbFile4)
+	TestConflictGraph(txList, w, dbFile4)
+	TestSimulation(txList, w)
+}
+
+// CleanupDatabases 删除所有旧的数据库目录，确保每次测试从零开始
+func CleanupDatabases() {
+	dbFiles := []string{dbFile1, dbFile2, dbFile3, dbFile4, dbFile5, dbFile6}
+	for _, dbFile := range dbFiles {
+		if err := os.RemoveAll(dbFile); err != nil {
+			log.Printf("Warning: could not remove database %s: %v", dbFile, err)
+		} else {
+			log.Printf("Cleaned up database: %s", dbFile)
+		}
+	}
 }
 
 // TestSimulation test concurrent transaction simulations
-func TestSimulation(addrNum uint64, txNum int, skew float64, writer *bufio.Writer) {
+func TestSimulation(txList []utils.Transaction, writer *bufio.Writer) {
 	var evmPools []*levm.LEVM
 	var fromAddress []common.Address
 	var cAddress []common.Address
 
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	z := zipf.NewZipf(r, skew, addrNum)
-
-	selectFunc := []string{"almagate", "updateBalance", "updateSaving", "sendPayment", "writeCheck", "getBalance"}
+	txNum := len(txList)
 
 	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
 		"./SmallBank/small_bank_sol_SmallBank.bin")
@@ -110,24 +123,9 @@ func TestSimulation(addrNum uint64, txNum int, skew float64, writer *bufio.Write
 		lvm := evmPools[n]
 		fromAddr := fromAddress[n]
 		addr := cAddress[n]
+		tx := txList[n]
 
-		rand.Seed(time.Now().UnixNano())
-		//random := rand.Intn(4)
-		random := rand.Float32()
-
-		// read-write 50-50
-		var function string
-		if random <= 0.05 {
-			function = selectFunc[5]
-		} else {
-			random2 := rand.Intn(5)
-			function = selectFunc[random2]
-		}
-
-		addr1 := z.Uint64()
-		addr2 := z.Uint64()
-
-		utils.SelectFunctions(lvm, fromAddr, addr, abiObject, function, addr1, addr2)
+		utils.SelectFunctions(lvm, fromAddr, addr, abiObject, tx.Function, tx.Addr1, tx.Addr2)
 
 		wg.Done()
 	})
@@ -152,11 +150,11 @@ func TestSimulation(addrNum uint64, txNum int, skew float64, writer *bufio.Write
 }
 
 // TestConflictGraph test concurrency control performance of CG
-func TestConflictGraph(addrNum uint64, txNum int, skew float64, writer *bufio.Writer, dbFile string) {
+func TestConflictGraph(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
 	var al core.AlGraph
 	var inValidTxs []int
 	// concurrently simulate transactions to capture read/write sets
-	txs := utils.ConCaptureRWSet(addrNum, txNum, skew, dbFile)
+	txs := utils.ConCaptureRWSetWithTransactions(txList, dbFile)
 	start := time.Now()
 
 	start1 := time.Now()
@@ -213,9 +211,9 @@ func TestConflictGraph(addrNum uint64, txNum int, skew float64, writer *bufio.Wr
 }
 
 // TestConflictQueue test concurrency control performance of ACG
-func TestConflictQueue(addrNum uint64, txNum int, skew float64, writer *bufio.Writer, dbFile string) {
+func TestConflictQueue(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
 	// concurrently simulate transactions to capture read/write sets
-	txs := utils.ConCaptureRWSet(addrNum, txNum, skew, dbFile)
+	txs := utils.ConCaptureRWSetWithTransactions(txList, dbFile)
 
 	start := time.Now()
 
@@ -283,10 +281,7 @@ func TestConflictQueue(addrNum uint64, txNum int, skew float64, writer *bufio.Wr
 }
 
 // TestSerialExecution test serial transaction processing
-func TestSerialExecution(addrNum uint64, txNum int, skew float64, writer *bufio.Writer) {
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	z := zipf.NewZipf(r, skew, addrNum)
-
+func TestSerialExecution(txList []utils.Transaction, writer *bufio.Writer) {
 	fromAddr := tools.NewRandomAddress()
 	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
 		"./SmallBank/small_bank_sol_SmallBank.bin")
@@ -303,28 +298,11 @@ func TestSerialExecution(addrNum uint64, txNum int, skew float64, writer *bufio.
 		fmt.Println(err)
 	}
 
-	selectFunc := []string{"almagate", "updateBalance", "updateSaving", "sendPayment", "writeCheck", "getBalance"}
-
 	start := time.Now()
 
-	// call smart contracts to update the state
-	for i := 0; i < txNum; i++ {
-		rand.Seed(time.Now().UnixNano())
-		random := rand.Intn(2)
-
-		// read-write 50-50
-		var function string
-		if random == 0 {
-			function = selectFunc[5]
-		} else {
-			random2 := rand.Intn(5)
-			function = selectFunc[random2]
-		}
-
-		addr1 := z.Uint64()
-		addr2 := z.Uint64()
-
-		utils.SelectFunctions(lvm, fromAddr, addr, abiObject, function, addr1, addr2)
+	// 使用预生成的交易序列
+	for _, tx := range txList {
+		utils.SelectFunctions(lvm, fromAddr, addr, abiObject, tx.Function, tx.Addr1, tx.Addr2)
 	}
 
 	stateDB := lvm.GetStateDB()

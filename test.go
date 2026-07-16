@@ -30,6 +30,7 @@ const dbFile3 = "DAG_Serial"
 const dbFile4 = "DAG_Sim"
 const dbFile5 = "DAG_Con"
 const dbFile6 = "Eth_Test"
+const dbFile7 = "DAG_NewAlgorithm" // 为新算法预留的数据库
 const fileName = "Exp_results.txt"
 
 func main() {
@@ -41,7 +42,7 @@ func main() {
 
 	flag.Uint64Var(&addrNum, "a", 10000, "specify address number to use. defaults to 10000.")
 	flag.IntVar(&txNum, "t", 200, "specify transaction number to use. defaults to 100.")
-	flag.Float64Var(&skew, "s", 0.6, "specify skew to use. defaults to 0.2.")
+	flag.Float64Var(&skew, "s", 0.6, "specify skew to use. defaults to 0.6.")
 	flag.IntVar(&blksize, "b", 200, "specify block size to use. defaults to 200.")
 	flag.IntVar(&con, "c", 4, "specify block size to use. defaults to 4.")
 
@@ -69,11 +70,13 @@ func main() {
 	TestConflictQueue(txList, w, dbFile4)
 	TestConflictGraph(txList, w, dbFile4)
 	TestSimulation(txList, w)
+	// TODO: 取消下面的注释来运行你的新算法测试
+	// TestNewAlgorithm(txList, w, dbFile7)
 }
 
 // CleanupDatabases 删除所有旧的数据库目录，确保每次测试从零开始
 func CleanupDatabases() {
-	dbFiles := []string{dbFile1, dbFile2, dbFile3, dbFile4, dbFile5, dbFile6}
+	dbFiles := []string{dbFile1, dbFile2, dbFile3, dbFile4, dbFile5, dbFile6, dbFile7}
 	for _, dbFile := range dbFiles {
 		if err := os.RemoveAll(dbFile); err != nil {
 			log.Printf("Warning: could not remove database %s: %v", dbFile, err)
@@ -383,6 +386,83 @@ func TestAppConcurrency(txNum int, blksize int, con int, addrNum uint64, skew fl
 	duration := time.Since(start)
 	fmt.Printf("Time of processing transactions: %s\n", duration)
 	fmt.Printf("Abort rate is: %.3f\n", float64(count)/float64(txNum))
+}
+
+// TestNewAlgorithm test your new concurrency control algorithm
+func TestNewAlgorithm(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
+	// concurrently simulate transactions to capture read/write sets
+	txs := utils.ConCaptureRWSetWithTransactions(txList, dbFile)
+
+	start := time.Now()
+
+	// TODO: 在这里调用你的新算法
+	// 例如：
+	// newAlgo := core.NewNewAlgorithmData()
+	// commitOrder, abortedNum := newAlgo.ProcessTransactions(txs)
+
+	// 示例计时（根据你的算法调整）
+	start1 := time.Now()
+	// ... 算法第一部分 ...
+	duration1 := time.Since(start1)
+	writer.WriteString(fmt.Sprintf("Time of your algorithm step 1: %s\n", duration1))
+
+	start2 := time.Now()
+	// ... 算法第二部分 ...
+	duration2 := time.Since(start2)
+	writer.WriteString(fmt.Sprintf("Time of your algorithm step 2: %s\n", duration2))
+
+	// TODO: 获取提交顺序和中止数量
+	// 示例：
+	// commitOrder := ...
+	// abortedNum := ...
+
+	var keys []int
+	// TODO: 准备提交的键
+	// for seq := range commitOrder {
+	// 	keys = append(keys, int(seq))
+	// }
+	sort.Ints(keys)
+
+	db := OpenDB(dbFile) // TODO: 为新算法选择合适的数据库文件（如 dbFile6 等）
+
+	start4 := time.Now()
+	// commit transactions
+	var wg sync.WaitGroup
+	p, _ := ants.NewPoolWithFunc(2000, func(i interface{}) {
+		n := i.([]*core.RWNode)
+		for _, rw := range n {
+			acc := core.CreateAccount(rw.RWSet.Key, rw.RWSet.Value)
+			err := utils.StoreState(db, acc)
+			if err != nil {
+				log.Panic(err)
+			}
+		}
+		wg.Done()
+	})
+	defer p.Release()
+
+	// TODO: 提交交易（根据你的 commitOrder 结构调整）
+	// for _, n := range keys {
+	// 	for _, v := range commitOrder[int32(n)] {
+	// 		if len(v) > 0 {
+	// 			wg.Add(1)
+	// 			_ = p.Invoke(v)
+	// 		}
+	// 	}
+	// 	wg.Wait()
+	// }
+
+	duration4 := time.Since(start4)
+	writer.WriteString(fmt.Sprintf("Time of committing transactions: %s\n", duration4))
+
+	duration := time.Since(start)
+	// TODO: 替换为实际的中止数量
+	count := 0 // newAlgo.GetAbortedNums()
+
+	writer.WriteString(fmt.Sprintf("Abort rate is: %.3f\n", float64(count)/float64(len(txs))))
+	writer.WriteString(fmt.Sprintf("Time of processing TXs on your new algorithm: %s\n", duration))
+	writer.WriteString(fmt.Sprintf("===================================================\n"))
+	writer.Flush()
 }
 
 // TestReplayingTx test a single transaction's replaying

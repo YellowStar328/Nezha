@@ -157,7 +157,7 @@ func TestConflictGraph(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 	var al core.AlGraph
 	var inValidTxs []int
 	// concurrently simulate transactions to capture read/write sets
-	txs := utils.ConCaptureRWSetWithTransactions(txList, dbFile)
+	txs, _ := utils.ConCaptureRWSetWithTransactions(txList, dbFile)
 	start := time.Now()
 
 	start1 := time.Now()
@@ -216,7 +216,7 @@ func TestConflictGraph(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 // TestConflictQueue test concurrency control performance of ACG
 func TestConflictQueue(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
 	// concurrently simulate transactions to capture read/write sets
-	txs := utils.ConCaptureRWSetWithTransactions(txList, dbFile)
+	txs, _ := utils.ConCaptureRWSetWithTransactions(txList, dbFile)
 
 	start := time.Now()
 
@@ -391,7 +391,7 @@ func TestAppConcurrency(txNum int, blksize int, con int, addrNum uint64, skew fl
 // TestNewAlgorithm test your new concurrency control algorithm
 func TestNewAlgorithm(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
 	// concurrently simulate transactions to capture read/write sets
-	txs := utils.ConCaptureRWSetWithTransactions(txList, dbFile)
+	txs, _ := utils.ConCaptureRWSetWithTransactions(txList, dbFile)
 
 	start := time.Now()
 

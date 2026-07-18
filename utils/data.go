@@ -177,17 +177,32 @@ func CaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][]*c
 func ConCaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][]*core.RWNode {
 	// 使用固定种子生成交易
 	txList := GenerateTransactions(addrNum, txNum, skew, 12345)
-	return ConCaptureRWSetWithTransactions(txList, dbFile)
+	rwNodes, _ := ConCaptureRWSetWithTransactions(txList, dbFile)
+	return rwNodes
 }
 
 // ConCaptureRWSetWithTransactions capture read/write set using pre-generated transactions
-func ConCaptureRWSetWithTransactions(txList []Transaction, dbFile string) [][]*core.RWNode {
+// captureContext: 可选参数，是否记录交易上下文用于后续验证
+func ConCaptureRWSetWithTransactions(
+	txList []Transaction,
+	dbFile string,
+	captureContext ...bool,
+) (
+	rwNodes [][]*core.RWNode,
+	contexts map[string]*core.TransactionContext,
+) {
 	var evmPools []*levm.LEVM
 	var fromAddress []common.Address
 	var cAddress []common.Address
 	var txs [][]*core.RWNode
 
 	txNum := len(txList)
+
+	// 根据参数决定是否初始化 contexts
+	shouldCapture := len(captureContext) > 0 && captureContext[0]
+	if shouldCapture {
+		contexts = make(map[string]*core.TransactionContext)
+	}
 
 	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
 		"./SmallBank/small_bank_sol_SmallBank.bin")
@@ -248,8 +263,23 @@ func ConCaptureRWSetWithTransactions(txList []Transaction, dbFile string) [][]*c
 		}
 
 		rwNodes := core.CreateRWNode(strconv.FormatInt(int64(n), 10), uint32(n), rAddr, rValue, wAddr, wValue)
+
 		lock.Lock()
 		txs = append(txs, rwNodes)
+
+		// 仅当需要时才记录 context
+		if shouldCapture {
+			ctx := core.RWNodesToContext(
+				strconv.FormatInt(int64(n), 10),
+				tx.Function,
+				tx.Addr1,
+				tx.Addr2,
+				rwNodes,
+				fromAddr,
+				addr,
+			)
+			contexts[ctx.TxID] = ctx
+		}
 		lock.Unlock()
 
 		wg.Done()
@@ -272,7 +302,7 @@ func ConCaptureRWSetWithTransactions(txList []Transaction, dbFile string) [][]*c
 		}
 	}
 
-	return sortedTxs
+	return sortedTxs, contexts
 }
 
 func SelectFunctions(lvm *levm.LEVM, fromAddr common.Address, cAddr common.Address, abiObject abi.ABI, funcName string,

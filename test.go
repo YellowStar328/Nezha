@@ -14,12 +14,14 @@ import (
 	"log"
 	"math"
 	"math/big"
-
+	"math/rand"
 	"os"
 	"runtime"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/chinuy/zipf"
 
 	"github.com/panjf2000/ants"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -65,38 +67,38 @@ func main() {
 	w.WriteString(fmt.Sprintf("===================================================\n"))
 	w.Flush()
 
-	// 预生成确定的交易序列，使用固定种子
-	txList := utils.GenerateTransactions(addrNum, txNum, skew, 12345)
-	// r := rand.New(rand.NewSource(12345))
-	// z := zipf.NewZipf(r, skew, addrNum)
-	// addr1 := z.Uint64()
-	// addr2 := z.Uint64()
-	// // 确保 addr2 != addr1
-	// for addr2 == addr1 {
-	// 	addr2 = z.Uint64()
-	// }
-	// txList := []utils.Transaction{
-	// 	{
-	// 		Function: "updateBalance",
-	// 		Addr1:    addr1,
-	// 		Addr2:    addr2,
-	// 	},
-	// 	{
-	// 		Function: "sendPayment",
-	// 		Addr1:    addr1,
-	// 		Addr2:    addr2,
-	// 	},
-	// 	{
-	// 		Function: "sendPayment",
-	// 		Addr1:    addr1,
-	// 		Addr2:    addr2,
-	// 	},
-	// 	{
-	// 		Function: "sendPayment",
-	// 		Addr1:    addr1,
-	// 		Addr2:    addr2,
-	// 	},
-	// }
+	// txList := utils.GenerateTransactions(addrNum, txNum, skew, 12345)
+	// txList := utils.GenerateTransactions(addrNum, txNum, skew, 12345)
+	r := rand.New(rand.NewSource(12345))
+	z := zipf.NewZipf(r, skew, addrNum)
+	addr1 := z.Uint64()
+	addr2 := z.Uint64()
+	// 确保 addr2 != addr1
+	for addr2 == addr1 {
+		addr2 = z.Uint64()
+	}
+	txList := []utils.Transaction{
+		{
+			Function: "updateBalance",
+			Addr1:    addr1,
+			Addr2:    addr2,
+		},
+		{
+			Function: "sendPayment",
+			Addr1:    addr1,
+			Addr2:    addr2,
+		},
+		{
+			Function: "sendPayment",
+			Addr1:    addr1,
+			Addr2:    addr2,
+		},
+		{
+			Function: "sendPayment",
+			Addr1:    addr1,
+			Addr2:    addr2,
+		},
+	}
 	TestSerialExecution(txList, w)
 	TestConflictQueue(txList, w, dbFile4)
 	TestConflictGraph(txList, w, dbFile4)
@@ -588,15 +590,15 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 			})
 			// #endregion
 
-			// 验证交易
-			valid, err := utils.ValidateAndExecuteTransactionWithDB(ctx, db)
+			// 使用新的验证逻辑：重新执行交易并对比写集
+			valid, err := utils.ReExecuteAndValidateTransactionWithDB(ctx, dbFile)
 			if err != nil || !valid {
 				reason := "validate-returned-false"
 				if err != nil {
 					reason = "validate-returned-error"
 				}
 				// #region debug-point E:validate-failure-reason
-				utils.ReportDebugEvent("E", "test.go:560", "validation aborted after ValidateAndExecuteTransaction", map[string]interface{}{
+				utils.ReportDebugEvent("E", "test.go:560", "validation aborted after ReExecuteAndValidateTransaction", map[string]interface{}{
 					"level":    level,
 					"txID":     txID,
 					"function": ctx.Function,

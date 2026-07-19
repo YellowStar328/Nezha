@@ -591,3 +591,61 @@ func isZeroValue(value []byte) bool {
 	}
 	return true
 }
+
+// WriteSetEqual 比较两个写集是否完全一致
+func WriteSetEqual(set1, set2 map[string][]byte) bool {
+	if len(set1) != len(set2) {
+		return false
+	}
+	for key, val1 := range set1 {
+		val2, exists := set2[key]
+		if !exists {
+			return false
+		}
+		if !bytes.Equal(val1, val2) {
+			return false
+		}
+	}
+	return true
+}
+
+// ReExecuteAndValidateTransactionWithDB 基于当前数据库状态重新执行交易，验证写集是否一致
+func ReExecuteAndValidateTransactionWithDB(
+	ctx *core.TransactionContext,
+	dbFile string,
+) (bool, error) {
+	// 加载合约 ABI 和二进制代码
+	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+		"./SmallBank/small_bank_sol_SmallBank.bin")
+	if err != nil {
+		return false, err
+	}
+
+	// 为每个交易创建独立的 EVM 实例，基于当前数据库状态
+	lvm := levm.New(dbFile, big.NewInt(0), ctx.FromAddr)
+	defer lvm.Close()
+
+	// 为发送者账户充值（确保有足够的 Gas）
+	lvm.NewAccount(ctx.FromAddr, big.NewInt(1e18))
+
+	// 重新部署合约（使用相同的发送者和合约代码）
+	_, _, _, err = lvm.DeployContract(ctx.FromAddr, binData)
+	if err != nil {
+		// 合约可能已经存在，我们可以忽略这个错误
+		// 继续执行交易
+	}
+
+	// 重新执行交易并捕获新的写集
+	_, newWMap := SelectFunctions2(lvm, ctx.FromAddr, ctx.ContractAddr, abiObject, ctx.Function, ctx.Addr1, ctx.Addr2)
+
+	// 将新捕获的写集转换为 map 格式
+	newWriteSet := make(map[string][]byte)
+	for key := range newWMap {
+		s := key.Bytes()
+		v := newWMap[key].Bytes()
+		newWriteSet[core.ConvertByte2String(s)] = v
+	}
+
+	// 对比新写集与预执行的旧写集
+	return WriteSetEqual(ctx.PreWriteSet, newWriteSet), nil
+}

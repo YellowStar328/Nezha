@@ -19,3 +19,7 @@ Exp_results.txt
 .DS_Store
 .vscode/
 .idea/
+utils/db_tool.go
+.dbg/nezha-validation-abort.env
+.dbg/trae-debug-log-nezha-validation-abort.ndjson
+debug-nezha-validation-abort.md

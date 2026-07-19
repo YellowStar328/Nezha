@@ -14,6 +14,7 @@ import (
 	"log"
 	"math"
 	"math/big"
+
 	"os"
 	"runtime"
 	"sort"
@@ -30,7 +31,8 @@ const dbFile3 = "DAG_Serial"
 const dbFile4 = "DAG_Sim"
 const dbFile5 = "DAG_Con"
 const dbFile6 = "Eth_Test"
-const dbFile7 = "DAG_NewAlgorithm" // 为新算法预留的数据库
+const dbFile7 = "DAG_NewAlgorithm"  // 为新算法预留的数据库
+const dbFile8 = "DAG_NezhaVariable" // 为 Nezha_variable 算法预留的数据库
 const fileName = "Exp_results.txt"
 
 func main() {
@@ -65,18 +67,48 @@ func main() {
 
 	// 预生成确定的交易序列，使用固定种子
 	txList := utils.GenerateTransactions(addrNum, txNum, skew, 12345)
-
+	// r := rand.New(rand.NewSource(12345))
+	// z := zipf.NewZipf(r, skew, addrNum)
+	// addr1 := z.Uint64()
+	// addr2 := z.Uint64()
+	// // 确保 addr2 != addr1
+	// for addr2 == addr1 {
+	// 	addr2 = z.Uint64()
+	// }
+	// txList := []utils.Transaction{
+	// 	{
+	// 		Function: "updateBalance",
+	// 		Addr1:    addr1,
+	// 		Addr2:    addr2,
+	// 	},
+	// 	{
+	// 		Function: "sendPayment",
+	// 		Addr1:    addr1,
+	// 		Addr2:    addr2,
+	// 	},
+	// 	{
+	// 		Function: "sendPayment",
+	// 		Addr1:    addr1,
+	// 		Addr2:    addr2,
+	// 	},
+	// 	{
+	// 		Function: "sendPayment",
+	// 		Addr1:    addr1,
+	// 		Addr2:    addr2,
+	// 	},
+	// }
 	TestSerialExecution(txList, w)
 	TestConflictQueue(txList, w, dbFile4)
 	TestConflictGraph(txList, w, dbFile4)
 	TestSimulation(txList, w)
 	// TODO: 取消下面的注释来运行你的新算法测试
 	// TestNewAlgorithm(txList, w, dbFile7)
+	TestNezhaVariable(txList, w, dbFile8)
 }
 
 // CleanupDatabases 删除所有旧的数据库目录，确保每次测试从零开始
 func CleanupDatabases() {
-	dbFiles := []string{dbFile1, dbFile2, dbFile3, dbFile4, dbFile5, dbFile6, dbFile7}
+	dbFiles := []string{dbFile1, dbFile2, dbFile3, dbFile4, dbFile5, dbFile6, dbFile7, dbFile8}
 	for _, dbFile := range dbFiles {
 		if err := os.RemoveAll(dbFile); err != nil {
 			log.Printf("Warning: could not remove database %s: %v", dbFile, err)
@@ -461,6 +493,198 @@ func TestNewAlgorithm(txList []utils.Transaction, writer *bufio.Writer, dbFile s
 
 	writer.WriteString(fmt.Sprintf("Abort rate is: %.3f\n", float64(count)/float64(len(txs))))
 	writer.WriteString(fmt.Sprintf("Time of processing TXs on your new algorithm: %s\n", duration))
+	writer.WriteString(fmt.Sprintf("===================================================\n"))
+	writer.Flush()
+}
+
+// TestNezhaVariable test Nezha_variable algorithm for variable read/write sets and finer-grained scheduling
+func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
+	// concurrently simulate transactions to capture read/write sets
+	txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
+
+	start := time.Now()
+
+	// 步骤 1: 构建图
+	start1 := time.Now()
+	graph := core.CreateVariableGraph(txs)
+	duration1 := time.Since(start1)
+	writer.WriteString(fmt.Sprintf("Time of graph construction: %s\n", duration1))
+
+	// 步骤 2: 队列排序
+	start2 := time.Now()
+	sequence := graph.QueuesSort()
+	duration2 := time.Since(start2)
+	writer.WriteString(fmt.Sprintf("Time of queue sorting: %s\n", duration2))
+
+	// 步骤 3: DeSS 排序
+	start3 := time.Now()
+	commitOrder := graph.DeSS(sequence)
+	duration3 := time.Since(start3)
+	writer.WriteString(fmt.Sprintf("Time of DeSS sorting: %s\n", duration3))
+
+	var keys []int
+	for seq := range commitOrder {
+		keys = append(keys, int(seq))
+	}
+	sort.Ints(keys)
+
+	start4 := time.Now()
+
+	// 统计中止数量，包括算法中止和验证中止
+	algorithmAborted := graph.GetAbortedNums()
+	validationAborted := 0
+
+	// 用于保护 validationAborted 的锁
+	var abortLock sync.Mutex
+
+	// 按层级顺序处理
+	for _, n := range keys {
+		level := int32(n)
+		transactionsInLevel := commitOrder[level]
+		db := OpenDB(dbFile)
+
+		// 存储当前层级验证通过的交易
+		var validTransactions [][]*core.RWNode
+		var validLock sync.Mutex
+		var failedTxIDs []string
+
+		// 当前层级的并行验证
+		var validateWg sync.WaitGroup
+		validatePool, _ := ants.NewPoolWithFunc(2000, func(i interface{}) {
+			wNodes := i.([]*core.RWNode)
+			if len(wNodes) == 0 {
+				validateWg.Done()
+				return
+			}
+
+			// 获取交易 ID
+			txID := wNodes[0].TransInfo.ID
+
+			// 获取预执行时记录的 context
+			ctx, exists := contexts[txID]
+			if !exists {
+				// 没有 context，中止该交易
+				// #region debug-point E:missing-context
+				utils.ReportDebugEvent("E", "test.go:536", "validation aborted because transaction context is missing", map[string]interface{}{
+					"level": level,
+					"txID":  txID,
+				})
+				// #endregion
+				abortLock.Lock()
+				validationAborted++
+				failedTxIDs = append(failedTxIDs, txID)
+				abortLock.Unlock()
+				validateWg.Done()
+				return
+			}
+
+			// #region debug-point B:validate-entry
+			utils.ReportDebugEvent("B", "test.go:543", "starting validation for transaction", map[string]interface{}{
+				"level":      level,
+				"txID":       txID,
+				"function":   ctx.Function,
+				"readCount":  len(ctx.PreReadSet),
+				"writeCount": len(ctx.PreWriteSet),
+			})
+			// #endregion
+
+			// 验证交易
+			valid, err := utils.ValidateAndExecuteTransactionWithDB(ctx, db)
+			if err != nil || !valid {
+				reason := "validate-returned-false"
+				if err != nil {
+					reason = "validate-returned-error"
+				}
+				// #region debug-point E:validate-failure-reason
+				utils.ReportDebugEvent("E", "test.go:560", "validation aborted after ValidateAndExecuteTransaction", map[string]interface{}{
+					"level":    level,
+					"txID":     txID,
+					"function": ctx.Function,
+					"valid":    valid,
+					"reason":   reason,
+					"err": func() string {
+						if err != nil {
+							return err.Error()
+						}
+						return ""
+					}(),
+				})
+				// #endregion
+				// 验证失败，中止该交易
+				abortLock.Lock()
+				validationAborted++
+				failedTxIDs = append(failedTxIDs, txID)
+				abortLock.Unlock()
+				validateWg.Done()
+				return
+			}
+
+			// 验证通过，保存交易以便提交
+			validLock.Lock()
+			validTransactions = append(validTransactions, wNodes)
+			validLock.Unlock()
+			validateWg.Done()
+		})
+
+		// 提交验证任务
+		for _, v := range transactionsInLevel {
+			if len(v) > 0 {
+				validateWg.Add(1)
+				_ = validatePool.Invoke(v)
+			}
+		}
+
+		// 等待当前层级所有验证完成
+		validateWg.Wait()
+		validatePool.Release()
+
+		// #region debug-point D:level-summary
+		utils.ReportDebugEvent("D", "test.go:585", "finished validation for level", map[string]interface{}{
+			"level":             level,
+			"candidateTxCount":  len(transactionsInLevel),
+			"validTxCount":      len(validTransactions),
+			"failedTxCount":     len(failedTxIDs),
+			"failedTxIDsSample": failedTxIDs,
+		})
+		// #endregion
+
+		// 并行提交验证通过的交易
+		var commitWg sync.WaitGroup
+		commitPool, _ := ants.NewPoolWithFunc(2000, func(i interface{}) {
+			wNodes := i.([]*core.RWNode)
+			// 直接使用预执行时的旧写集进行提交
+			for _, rw := range wNodes {
+				acc := core.CreateAccount(rw.RWSet.Key, rw.RWSet.Value)
+				err := utils.StoreState(db, acc)
+				if err != nil {
+					log.Panic(err)
+				}
+			}
+			commitWg.Done()
+		})
+
+		// 提交验证通过的交易
+		for _, tx := range validTransactions {
+			commitWg.Add(1)
+			_ = commitPool.Invoke(tx)
+		}
+
+		// 等待当前层级所有交易提交完成
+		commitWg.Wait()
+		commitPool.Release()
+		db.Close()
+	}
+
+	duration4 := time.Since(start4)
+	writer.WriteString(fmt.Sprintf("Time of validating and committing transactions: %s\n", duration4))
+
+	duration := time.Since(start)
+	totalAborted := algorithmAborted + validationAborted
+
+	writer.WriteString(fmt.Sprintf("Algorithm aborted: %d, Validation aborted: %d, Total aborted: %d\n",
+		algorithmAborted, validationAborted, totalAborted))
+	writer.WriteString(fmt.Sprintf("Abort rate is: %.3f\n", float64(totalAborted)/float64(len(txs))))
+	writer.WriteString(fmt.Sprintf("Time of processing TXs on Nezha_variable: %s\n", duration))
 	writer.WriteString(fmt.Sprintf("===================================================\n"))
 	writer.Flush()
 }

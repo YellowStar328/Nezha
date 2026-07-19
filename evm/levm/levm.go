@@ -203,6 +203,14 @@ func (lvm *LEVM) ReplayTransaction(tx cc.EthTransaction, gp *core.GasPool) (vm.S
 // GetStateDB - obtain the current stateDB snapshot
 func (lvm *LEVM) GetStateDB() *state.StateDB { return lvm.stateDB }
 
+// Close releases the underlying database handle used by LEVM.
+func (lvm *LEVM) Close() error {
+	if lvm == nil || lvm.edb == nil {
+		return nil
+	}
+	return lvm.edb.Close()
+}
+
 // RefundGas refund the remaining gas to the sender and gas pool
 func (lvm *LEVM) RefundGas(st *vmi.StateTrans) {
 	refund := st.GasUsed() / 2

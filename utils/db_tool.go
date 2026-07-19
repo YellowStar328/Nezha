@@ -40,6 +40,17 @@ func FetchState(db *leveldb.DB, addr []byte) (*core.StateAccount, error) {
 	return acc, nil
 }
 
+// FetchStateValue gets the raw account value without logging.
+func FetchStateValue(db *leveldb.DB, addr []byte) ([]byte, error) {
+	key := bytes.Join([][]byte{[]byte("a"), addr}, []byte{})
+	data, err := db.Get(key, nil)
+	if err != nil {
+		return nil, err
+	}
+	acc := core.DeserializeAcc(data)
+	return acc.Value, nil
+}
+
 // open db instance or create a db if not exist
 func LoadDB(blkFile string) (*leveldb.DB, error) {
 	// log.Println("LoadDB() function is called")

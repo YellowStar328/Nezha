@@ -7,16 +7,23 @@ import (
 	"Nezha/ethereum/go-ethereum/core/vm"
 	"Nezha/evm/levm"
 	"Nezha/evm/levm/tools"
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"math/rand"
+	"net/http"
+	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/chinuy/zipf"
 	"github.com/panjf2000/ants"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 // Transaction 表示一个预生成的交易
@@ -24,6 +31,57 @@ type Transaction struct {
 	Function string // 函数名
 	Addr1    uint64 // 地址1
 	Addr2    uint64 // 地址2
+}
+
+type debugEvent struct {
+	SessionID    string                 `json:"sessionId"`
+	RunID        string                 `json:"runId"`
+	HypothesisID string                 `json:"hypothesisId"`
+	Location     string                 `json:"location,omitempty"`
+	Msg          string                 `json:"msg"`
+	Data         map[string]interface{} `json:"data,omitempty"`
+	Ts           int64                  `json:"ts"`
+}
+
+func ReportDebugEvent(hypothesisID, location, msg string, data map[string]interface{}) {
+	url := "http://127.0.0.1:7777/event"
+	sessionID := "nezha-validation-abort"
+
+	if envContent, err := os.ReadFile(".dbg/nezha-validation-abort.env"); err == nil {
+		for _, line := range strings.Split(string(envContent), "\n") {
+			if strings.HasPrefix(line, "DEBUG_SERVER_URL=") {
+				url = strings.TrimPrefix(line, "DEBUG_SERVER_URL=")
+			}
+			if strings.HasPrefix(line, "DEBUG_SESSION_ID=") {
+				sessionID = strings.TrimPrefix(line, "DEBUG_SESSION_ID=")
+			}
+		}
+	}
+
+	body, err := json.Marshal(debugEvent{
+		SessionID:    sessionID,
+		RunID:        "pre-fix",
+		HypothesisID: hypothesisID,
+		Location:     location,
+		Msg:          "[DEBUG] " + msg,
+		Data:         data,
+		Ts:           time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	_ = resp.Body.Close()
 }
 
 // GenerateTransactions 预生成确定的交易序列
@@ -209,7 +267,7 @@ func ConCaptureRWSetWithTransactions(
 	if err != nil {
 		fmt.Println(err)
 	}
-
+	//随机地址充值1e8 wei
 	for i := 0; i < txNum; i++ {
 		fromAddr := tools.NewRandomAddress()
 		fromAddress = append(fromAddress, fromAddr)
@@ -223,7 +281,6 @@ func ConCaptureRWSetWithTransactions(
 		if err != nil {
 			fmt.Println(err)
 		}
-
 		cAddress = append(cAddress, addr)
 	}
 
@@ -279,6 +336,17 @@ func ConCaptureRWSetWithTransactions(
 				addr,
 			)
 			contexts[ctx.TxID] = ctx
+			// #region debug-point C:capture-context
+			ReportDebugEvent("C", "utils/data.go:305", "captured pre-execution context", map[string]interface{}{
+				"txID":         ctx.TxID,
+				"function":     ctx.Function,
+				"addr1":        ctx.Addr1,
+				"addr2":        ctx.Addr2,
+				"readCount":    len(ctx.PreReadSet),
+				"writeCount":   len(ctx.PreWriteSet),
+				"contractAddr": ctx.ContractAddr.Hex(),
+			})
+			// #endregion
 		}
 		lock.Unlock()
 
@@ -292,6 +360,12 @@ func ConCaptureRWSetWithTransactions(
 	}
 
 	wg.Wait()
+
+	for _, lvm := range evmPools {
+		if lvm != nil {
+			_ = lvm.Close()
+		}
+	}
 
 	// 按照交易顺序重新排序（因为并发执行可能导致顺序混乱）
 	sortedTxs := make([][]*core.RWNode, txNum)
@@ -423,4 +497,97 @@ func ProcessRWMap(rMap, wMap vm.Storage) (map[string]string, map[string]string) 
 	}
 
 	return readSet, writeSet
+}
+
+// ValidateAndExecuteTransactionWithDB validates that the pre-executed read set
+// still matches the current committed database state using a shared DB handle.
+func ValidateAndExecuteTransactionWithDB(
+	ctx *core.TransactionContext,
+	db *leveldb.DB,
+) (bool, error) {
+	for key, preValue := range ctx.PreReadSet {
+		addr, err := hex.DecodeString(key)
+		if err != nil {
+			// #region debug-point C:decode-failure
+			ReportDebugEvent("C", "utils/data.go:472", "failed to decode pre-read-set key", map[string]interface{}{
+				"txID": ctx.TxID,
+				"key":  key,
+				"err":  err.Error(),
+			})
+			// #endregion
+			return false, err
+		}
+
+		currentValue, err := FetchStateValue(db, addr)
+		if err != nil {
+			if err == leveldb.ErrNotFound && isZeroValue(preValue) {
+				continue
+			}
+			if err == leveldb.ErrNotFound {
+				// #region debug-point A:not-found-mismatch
+				ReportDebugEvent("A", "utils/data.go:484", "validation failed because current value is missing", map[string]interface{}{
+					"txID":           ctx.TxID,
+					"function":       ctx.Function,
+					"key":            key,
+					"preValueHex":    hex.EncodeToString(preValue),
+					"currentMissing": true,
+				})
+				// #endregion
+				return false, nil
+			}
+			// #region debug-point A:fetch-error
+			ReportDebugEvent("A", "utils/data.go:493", "validation failed while reading current database value", map[string]interface{}{
+				"txID":     ctx.TxID,
+				"function": ctx.Function,
+				"key":      key,
+				"err":      err.Error(),
+			})
+			// #endregion
+			return false, err
+		}
+
+		if !bytes.Equal(preValue, currentValue) {
+			// #region debug-point A:value-mismatch
+			ReportDebugEvent("A", "utils/data.go:503", "validation failed because current value differs from pre-read-set", map[string]interface{}{
+				"txID":            ctx.TxID,
+				"function":        ctx.Function,
+				"addr1":           ctx.Addr1,
+				"addr2":           ctx.Addr2,
+				"key":             key,
+				"preValueHex":     hex.EncodeToString(preValue),
+				"currentValueHex": hex.EncodeToString(currentValue),
+			})
+			// #endregion
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+// ValidateAndExecuteTransaction validates that the pre-executed read set still
+// matches the current committed database state.
+func ValidateAndExecuteTransaction(
+	ctx *core.TransactionContext,
+	dbFile string,
+) (bool, error) {
+	db, err := LoadDB(dbFile)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+
+	return ValidateAndExecuteTransactionWithDB(ctx, db)
+}
+
+func isZeroValue(value []byte) bool {
+	if len(value) == 0 {
+		return true
+	}
+	for _, b := range value {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }

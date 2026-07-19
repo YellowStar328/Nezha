@@ -711,9 +711,9 @@ func ReExecuteAndValidateTransactionWithState(
 
 		if delta.Sign() < 0 {
 			delta = new(big.Int).Add(delta, two256)
-			if delta.Cmp(two255) >= 0 {
-				delta = new(big.Int).Sub(delta, two256)
-			}
+		}
+		if delta.Cmp(two255) >= 0 {
+			delta = new(big.Int).Sub(delta, two256)
 		}
 
 		newWriteDelta[keyStr] = delta

@@ -530,12 +530,11 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 	}
 	sort.Ints(keys)
 
-	start4 := time.Now()
-
 	// 统计中止数量，包括算法中止和验证中止
 	algorithmAborted := graph.GetAbortedNums()
 	validationAborted := 0
 
+	start4 := time.Now()
 	// 用于保护 validationAborted 的锁
 	var abortLock sync.Mutex
 	committedState := make(map[string][]byte)
@@ -680,8 +679,42 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 		}
 	}
 
-	duration4 := time.Since(start4)
-	writer.WriteString(fmt.Sprintf("Time of validating and committing transactions: %s\n", duration4))
+	durationValidation := time.Since(start4)
+	writer.WriteString(fmt.Sprintf("Time of validating transactions: %s\n", durationValidation))
+
+	db := OpenDB(dbFile)
+	startCommit := time.Now()
+
+	var wg sync.WaitGroup
+	p, _ := ants.NewPoolWithFunc(2000, func(i interface{}) {
+		n := i.([]*core.RWNode)
+		for _, rw := range n {
+			keyStr := core.ConvertByte2String(rw.RWSet.Key)
+			if finalVal, ok := committedState[keyStr]; ok {
+				acc := core.CreateAccount(rw.RWSet.Key, finalVal)
+				err := utils.StoreState(db, acc)
+				if err != nil {
+					log.Panic(err)
+				}
+
+			}
+		}
+		wg.Done()
+	})
+	defer p.Release()
+
+	for _, n := range keys {
+		for _, v := range commitOrder[int32(n)] {
+			if len(v) > 0 {
+				wg.Add(1)
+				_ = p.Invoke(v)
+			}
+		}
+		wg.Wait()
+	}
+
+	durationCommit := time.Since(startCommit)
+	writer.WriteString(fmt.Sprintf("Time of committing transactions: %s\n", durationCommit))
 
 	duration := time.Since(start)
 	totalAborted := algorithmAborted + validationAborted

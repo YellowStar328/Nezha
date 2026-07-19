@@ -80,8 +80,8 @@ func main() {
 	txList := []utils.Transaction{
 		{
 			Function: "updateBalance",
-			Addr1:    addr1,
-			Addr2:    addr2,
+			Addr1:    addr2,
+			Addr2:    addr1,
 		},
 		{
 			Function: "sendPayment",
@@ -538,15 +538,21 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 
 	// 用于保护 validationAborted 的锁
 	var abortLock sync.Mutex
+	committedState := make(map[string][]byte)
+
+	type validatedTransaction struct {
+		txID       string
+		writeDelta map[string]*big.Int
+	}
 
 	// 按层级顺序处理
 	for _, n := range keys {
 		level := int32(n)
 		transactionsInLevel := commitOrder[level]
-		db := OpenDB(dbFile)
+		levelState := utils.CloneWriteSet(committedState)
 
 		// 存储当前层级验证通过的交易
-		var validTransactions [][]*core.RWNode
+		var validTransactions []validatedTransaction
 		var validLock sync.Mutex
 		var failedTxIDs []string
 
@@ -591,7 +597,7 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 			// #endregion
 
 			// 使用新的验证逻辑：重新执行交易并对比写集
-			valid, err := utils.ReExecuteAndValidateTransactionWithDB(ctx, dbFile)
+			valid, newWriteSet, err := utils.ReExecuteAndValidateTransactionWithState(ctx, dbFile, levelState)
 			if err != nil || !valid {
 				reason := "validate-returned-false"
 				if err != nil {
@@ -623,7 +629,10 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 
 			// 验证通过，保存交易以便提交
 			validLock.Lock()
-			validTransactions = append(validTransactions, wNodes)
+			validTransactions = append(validTransactions, validatedTransaction{
+				txID:       txID,
+				writeDelta: newWriteSet,
+			})
 			validLock.Unlock()
 			validateWg.Done()
 		})
@@ -650,31 +659,25 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 		})
 		// #endregion
 
-		// 并行提交验证通过的交易
-		var commitWg sync.WaitGroup
-		commitPool, _ := ants.NewPoolWithFunc(2000, func(i interface{}) {
-			wNodes := i.([]*core.RWNode)
-			// 直接使用预执行时的旧写集进行提交
-			for _, rw := range wNodes {
-				acc := core.CreateAccount(rw.RWSet.Key, rw.RWSet.Value)
-				err := utils.StoreState(db, acc)
-				if err != nil {
-					log.Panic(err)
-				}
-			}
-			commitWg.Done()
-		})
-
-		// 提交验证通过的交易
+		// 使用验证得到的增量更新逻辑合约存储，供后续层级重执行读取
+		two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
 		for _, tx := range validTransactions {
-			commitWg.Add(1)
-			_ = commitPool.Invoke(tx)
-		}
+			for key, delta := range tx.writeDelta {
+				var currentBig *big.Int
+				if currentVal, ok := committedState[key]; ok {
+					currentBig = new(big.Int).SetBytes(currentVal)
+				} else {
+					currentBig = big.NewInt(0)
+				}
+				newVal := new(big.Int).Add(currentBig, delta)
 
-		// 等待当前层级所有交易提交完成
-		commitWg.Wait()
-		commitPool.Release()
-		db.Close()
+				if newVal.Sign() < 0 {
+					newVal = new(big.Int).Add(newVal, two256)
+				}
+
+				committedState[key] = newVal.Bytes()
+			}
+		}
 	}
 
 	duration4 := time.Since(start4)

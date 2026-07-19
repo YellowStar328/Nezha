@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"math/big"
 	"reflect"
 
 	"Nezha/ethereum/go-ethereum/common"
@@ -63,14 +64,15 @@ func ConvertByte2String(bytes []byte) string {
 // TransactionContext 记录预执行的交易上下文（用于后续验证）
 // 注意：不直接引用 utils.Transaction，避免循环依赖
 type TransactionContext struct {
-	TxID         string
-	Function     string            // 交易函数名
-	Addr1        uint64            // 交易参数
-	Addr2        uint64            // 交易参数
-	PreReadSet   map[string][]byte // key -> value
-	PreWriteSet  map[string][]byte
-	FromAddr     common.Address
-	ContractAddr common.Address
+	TxID          string
+	Function      string              // 交易函数名
+	Addr1         uint64              // 交易参数
+	Addr2         uint64              // 交易参数
+	PreReadSet    map[string][]byte   // key -> value
+	PreWriteSet   map[string][]byte   // key -> final value
+	PreWriteDelta map[string]*big.Int // key -> delta (write - read)
+	FromAddr      common.Address
+	ContractAddr  common.Address
 }
 
 // RWNodesToContext 辅助函数：将 []*RWNode 转换为 TransactionContext
@@ -85,6 +87,10 @@ func RWNodesToContext(
 ) *TransactionContext {
 	readSet := make(map[string][]byte)
 	writeSet := make(map[string][]byte)
+	writeDelta := make(map[string]*big.Int)
+
+	two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
+	two255 := new(big.Int).Rsh(two256, 1)
 
 	for _, rw := range rwNodes {
 		key := ConvertByte2String(rw.RWSet.Key)
@@ -92,17 +98,37 @@ func RWNodesToContext(
 			readSet[key] = rw.RWSet.Value
 		} else if rw.Label == "w" {
 			writeSet[key] = rw.RWSet.Value
+
+			if readVal, ok := readSet[key]; ok {
+				readBig := new(big.Int).SetBytes(readVal)
+				writeBig := new(big.Int).SetBytes(rw.RWSet.Value)
+
+				delta := new(big.Int).Sub(writeBig, readBig)
+
+				if delta.Sign() < 0 {
+					delta = new(big.Int).Add(delta, two256)
+				}
+
+				if delta.Cmp(two255) >= 0 {
+					delta = new(big.Int).Sub(delta, two256)
+				}
+
+				writeDelta[key] = delta
+			} else {
+				writeDelta[key] = new(big.Int).SetBytes(rw.RWSet.Value)
+			}
 		}
 	}
 
 	return &TransactionContext{
-		TxID:         txID,
-		Function:     function,
-		Addr1:        addr1,
-		Addr2:        addr2,
-		PreReadSet:   readSet,
-		PreWriteSet:  writeSet,
-		FromAddr:     fromAddr,
-		ContractAddr: contractAddr,
+		TxID:          txID,
+		Function:      function,
+		Addr1:         addr1,
+		Addr2:         addr2,
+		PreReadSet:    readSet,
+		PreWriteSet:   writeSet,
+		PreWriteDelta: writeDelta,
+		FromAddr:      fromAddr,
+		ContractAddr:  contractAddr,
 	}
 }

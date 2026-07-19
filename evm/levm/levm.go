@@ -59,8 +59,9 @@ func (lvm *LEVM) NewEVM(blockNumber *big.Int, origin common.Address) {
 	structLogger := vm.NewStructLogger(&logConfig)
 	vmConfig := vm.Config{Debug: true, Tracer: structLogger /*JumpTable: vm.NewByzantiumInstructionSet()*/}
 
-	// create the evm
-	lvm.evm = vm.NewEVM(vmContext, lvm.stateDB, params.MainnetChainConfig, vmConfig)
+	// Use a chain config with all major forks enabled from block 0 so
+	// contracts compiled by modern solc versions can execute in this LEVM.
+	lvm.evm = vm.NewEVM(vmContext, lvm.stateDB, params.AllEthashProtocolChanges, vmConfig)
 	lvm.structLogger = structLogger
 }
 

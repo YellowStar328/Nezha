@@ -609,43 +609,116 @@ func WriteSetEqual(set1, set2 map[string][]byte) bool {
 	return true
 }
 
-// ReExecuteAndValidateTransactionWithDB 基于当前数据库状态重新执行交易，验证写集是否一致
-func ReExecuteAndValidateTransactionWithDB(
+// WriteDeltaEqual 比较两个增量写集是否完全一致
+func WriteDeltaEqual(set1, set2 map[string]*big.Int) bool {
+	if len(set1) != len(set2) {
+		return false
+	}
+	for key, delta1 := range set1 {
+		delta2, exists := set2[key]
+		if !exists {
+			return false
+		}
+		if delta1.Cmp(delta2) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// CloneWriteSet 深拷贝写集，避免不同层级之间共享底层切片。
+func CloneWriteSet(set map[string][]byte) map[string][]byte {
+	cloned := make(map[string][]byte, len(set))
+	for key, value := range set {
+		cloned[key] = append([]byte(nil), value...)
+	}
+	return cloned
+}
+
+func applyLogicalStateToContract(
+	lvm *levm.LEVM,
+	contractAddr common.Address,
+	logicalState map[string][]byte,
+) error {
+	stateDB := lvm.GetStateDB()
+	for keyHex, value := range logicalState {
+		keyBytes, err := hex.DecodeString(keyHex)
+		if err != nil {
+			return err
+		}
+		stateDB.SetState(contractAddr, common.BytesToHash(keyBytes), common.BytesToHash(value))
+	}
+	return nil
+}
+
+// ReExecuteAndValidateTransactionWithState 基于当前逻辑状态重新执行交易，验证增量是否一致。
+func ReExecuteAndValidateTransactionWithState(
 	ctx *core.TransactionContext,
 	dbFile string,
-) (bool, error) {
+	logicalState map[string][]byte,
+) (bool, map[string]*big.Int, error) {
 	// 加载合约 ABI 和二进制代码
 	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
 		"./SmallBank/small_bank_sol_SmallBank.bin")
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 
-	// 为每个交易创建独立的 EVM 实例，基于当前数据库状态
+	// 为每个交易创建独立的 EVM 实例，并用层间已提交的逻辑状态初始化合约存储
 	lvm := levm.New(dbFile, big.NewInt(0), ctx.FromAddr)
 	defer lvm.Close()
 
 	// 为发送者账户充值（确保有足够的 Gas）
 	lvm.NewAccount(ctx.FromAddr, big.NewInt(1e18))
 
-	// 重新部署合约（使用相同的发送者和合约代码）
-	_, _, _, err = lvm.DeployContract(ctx.FromAddr, binData)
+	// 重新部署合约，得到本次重执行实际使用的合约地址
+	_, contractAddr, _, err := lvm.DeployContract(ctx.FromAddr, binData)
 	if err != nil {
-		// 合约可能已经存在，我们可以忽略这个错误
-		// 继续执行交易
+		return false, nil, err
 	}
+
+	if err := applyLogicalStateToContract(lvm, contractAddr, logicalState); err != nil {
+		return false, nil, err
+	}
+
+	// 重新创建 EVM 以刷新 tracer，避免部署和状态注入污染本次交易的读写集
+	lvm.NewEVM(big.NewInt(0), ctx.FromAddr)
 
 	// 重新执行交易并捕获新的写集
-	_, newWMap := SelectFunctions2(lvm, ctx.FromAddr, ctx.ContractAddr, abiObject, ctx.Function, ctx.Addr1, ctx.Addr2)
+	newRMap, newWMap := SelectFunctions2(lvm, ctx.FromAddr, contractAddr, abiObject, ctx.Function, ctx.Addr1, ctx.Addr2)
 
-	// 将新捕获的写集转换为 map 格式
-	newWriteSet := make(map[string][]byte)
+	// 计算增量：写值 - 读值（处理 uint256 下溢）
+	two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
+	two255 := new(big.Int).Rsh(two256, 1)
+
+	newWriteDelta := make(map[string]*big.Int)
 	for key := range newWMap {
-		s := key.Bytes()
-		v := newWMap[key].Bytes()
-		newWriteSet[core.ConvertByte2String(s)] = v
+		keyStr := core.ConvertByte2String(key.Bytes())
+		writeBig := new(big.Int).SetBytes(newWMap[key].Bytes())
+
+		var readBig *big.Int
+		if readVal, ok := newRMap[key]; ok {
+			readBig = new(big.Int).SetBytes(readVal.Bytes())
+		} else {
+			if currentVal, ok := logicalState[keyStr]; ok {
+				readBig = new(big.Int).SetBytes(currentVal)
+			} else {
+				readBig = big.NewInt(0)
+			}
+		}
+
+		delta := new(big.Int).Sub(writeBig, readBig)
+
+		if delta.Sign() < 0 {
+			delta = new(big.Int).Add(delta, two256)
+			if delta.Cmp(two255) >= 0 {
+				delta = new(big.Int).Sub(delta, two256)
+			}
+		}
+
+		newWriteDelta[keyStr] = delta
 	}
 
-	// 对比新写集与预执行的旧写集
-	return WriteSetEqual(ctx.PreWriteSet, newWriteSet), nil
+	// 对比增量
+	return WriteDeltaEqual(ctx.PreWriteDelta, newWriteDelta), newWriteDelta, nil
 }

@@ -51,10 +51,13 @@ contract SmallBank {
         uint256 bal1 = checkingStore[arg0];
         uint256 bal2 = checkingStore[arg1];
         uint256 amount = arg2;
-
+        
+        if (bal2 != 0  && bal2 != 100) {
+            amount = 0;
+        }
         bal1 -= amount;
         bal2 += amount;
-
+   
         checkingStore[arg0] = bal1;
         checkingStore[arg1] = bal2;
     }

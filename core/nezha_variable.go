@@ -285,7 +285,13 @@ func (nv *NezhaVariableData) sortInQueue(queue *VariableQueue) {
 			edge := nv.Edges[id].set
 			w.assignSequence(edge)
 		} else {
-			nv.Edges[id].isAborted = true
+			// nv.Edges[id].isAborted = true
+			w.Sequence = queue.maxWrite + 1
+			queue.maxWrite += 1
+			queue.maxRead = queue.maxWrite
+			w.isAssigned = true
+			edge := nv.Edges[id].set
+			w.assignSequence(edge)
 		}
 	}
 

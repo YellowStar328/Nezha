@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/chinuy/zipf"
-
 	"github.com/panjf2000/ants"
 	"github.com/syndtr/goleveldb/leveldb"
 )
@@ -43,13 +42,13 @@ func main() {
 	var skew float64
 	var blksize int
 	var con int
-
+	var testMode bool
 	flag.Uint64Var(&addrNum, "a", 10000, "specify address number to use. defaults to 10000.")
 	flag.IntVar(&txNum, "t", 200, "specify transaction number to use. defaults to 100.")
 	flag.Float64Var(&skew, "s", 0.6, "specify skew to use. defaults to 0.6.")
 	flag.IntVar(&blksize, "b", 200, "specify block size to use. defaults to 200.")
 	flag.IntVar(&con, "c", 4, "specify block size to use. defaults to 4.")
-
+	flag.BoolVar(&testMode, "test", false, "specify test mode to use. defaults to false.")
 	flag.Parse()
 
 	// 清理旧的数据库，确保每次测试从零开始
@@ -66,39 +65,44 @@ func main() {
 	w.WriteString(fmt.Sprintf("Test started at: %s\n", time.Now().Format(time.RFC3339)))
 	w.WriteString(fmt.Sprintf("===================================================\n"))
 	w.Flush()
+	var txList []utils.Transaction
+	// txList := utils.GenerateTransactions(addrNum, txNum, skew, 12345)
+	// txList := utils.GenerateTransactions(addrNum, txNum, skew, 12345)
+	if testMode {
+		r := rand.New(rand.NewSource(12345))
+		z := zipf.NewZipf(r, skew, addrNum)
+		addr1 := z.Uint64()
+		addr2 := z.Uint64()
+		// 确保 addr2 != addr1
+		for addr2 == addr1 {
+			addr2 = z.Uint64()
+		}
+		txList = []utils.Transaction{
+			{
+				Function: "updateBalance",
+				Addr1:    addr2,
+				Addr2:    addr1,
+			},
+			{
+				Function: "sendPayment",
+				Addr1:    addr1,
+				Addr2:    addr2,
+			},
+			{
+				Function: "sendPayment",
+				Addr1:    addr1,
+				Addr2:    addr2,
+			},
+			{
+				Function: "sendPayment",
+				Addr1:    addr1,
+				Addr2:    addr2,
+			},
+		}
+	} else {
+		txList = utils.GenerateTransactions(addrNum, txNum, skew, 12345)
+	}
 
-	// txList := utils.GenerateTransactions(addrNum, txNum, skew, 12345)
-	// txList := utils.GenerateTransactions(addrNum, txNum, skew, 12345)
-	r := rand.New(rand.NewSource(12345))
-	z := zipf.NewZipf(r, skew, addrNum)
-	addr1 := z.Uint64()
-	addr2 := z.Uint64()
-	// 确保 addr2 != addr1
-	for addr2 == addr1 {
-		addr2 = z.Uint64()
-	}
-	txList := []utils.Transaction{
-		{
-			Function: "updateBalance",
-			Addr1:    addr2,
-			Addr2:    addr1,
-		},
-		{
-			Function: "sendPayment",
-			Addr1:    addr1,
-			Addr2:    addr2,
-		},
-		{
-			Function: "sendPayment",
-			Addr1:    addr1,
-			Addr2:    addr2,
-		},
-		{
-			Function: "sendPayment",
-			Addr1:    addr1,
-			Addr2:    addr2,
-		},
-	}
 	TestSerialExecution(txList, w)
 	TestConflictQueue(txList, w, dbFile4)
 	TestConflictGraph(txList, w, dbFile4)
@@ -501,11 +505,12 @@ func TestNewAlgorithm(txList []utils.Transaction, writer *bufio.Writer, dbFile s
 
 // TestNezhaVariable test Nezha_variable algorithm for variable read/write sets and finer-grained scheduling
 func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
+
 	// concurrently simulate transactions to capture read/write sets
 	txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
 
+	utils.InitEVMPool(dbFile, runtime.NumCPU())
 	start := time.Now()
-
 	// 步骤 1: 构建图
 	start1 := time.Now()
 	graph := core.CreateVariableGraph(txs)
@@ -572,10 +577,10 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 			if !exists {
 				// 没有 context，中止该交易
 				// #region debug-point E:missing-context
-				utils.ReportDebugEvent("E", "test.go:536", "validation aborted because transaction context is missing", map[string]interface{}{
-					"level": level,
-					"txID":  txID,
-				})
+				// utils.ReportDebugEvent("E", "test.go:536", "validation aborted because transaction context is missing", map[string]interface{}{
+				// 	"level": level,
+				// 	"txID":  txID,
+				// })
 				// #endregion
 				abortLock.Lock()
 				validationAborted++
@@ -586,36 +591,36 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 			}
 
 			// #region debug-point B:validate-entry
-			utils.ReportDebugEvent("B", "test.go:543", "starting validation for transaction", map[string]interface{}{
-				"level":      level,
-				"txID":       txID,
-				"function":   ctx.Function,
-				"readCount":  len(ctx.PreReadSet),
-				"writeCount": len(ctx.PreWriteSet),
-			})
+			// utils.ReportDebugEvent("B", "test.go:543", "starting validation for transaction", map[string]interface{}{
+			// 	"level":      level,
+			// 	"txID":       txID,
+			// 	"function":   ctx.Function,
+			// 	"readCount":  len(ctx.PreReadSet),
+			// 	"writeCount": len(ctx.PreWriteSet),
+			// })
 			// #endregion
 
 			// 使用新的验证逻辑：重新执行交易并对比写集
 			valid, newWriteSet, err := utils.ReExecuteAndValidateTransactionWithState(ctx, dbFile, levelState)
 			if err != nil || !valid {
-				reason := "validate-returned-false"
+				// reason := "validate-returned-false"
 				if err != nil {
-					reason = "validate-returned-error"
+					// reason = "validate-returned-error"
 				}
 				// #region debug-point E:validate-failure-reason
-				utils.ReportDebugEvent("E", "test.go:560", "validation aborted after ReExecuteAndValidateTransaction", map[string]interface{}{
-					"level":    level,
-					"txID":     txID,
-					"function": ctx.Function,
-					"valid":    valid,
-					"reason":   reason,
-					"err": func() string {
-						if err != nil {
-							return err.Error()
-						}
-						return ""
-					}(),
-				})
+				// utils.ReportDebugEvent("E", "test.go:560", "validation aborted after ReExecuteAndValidateTransaction", map[string]interface{}{
+				// 	"level":    level,
+				// 	"txID":     txID,
+				// 	"function": ctx.Function,
+				// 	"valid":    valid,
+				// 	"reason":   reason,
+				// 	"err": func() string {
+				// 		if err != nil {
+				// 			return err.Error()
+				// 		}
+				// 		return ""
+				// 	}(),
+				// })
 				// #endregion
 				// 验证失败，中止该交易
 				abortLock.Lock()
@@ -649,13 +654,13 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 		validatePool.Release()
 
 		// #region debug-point D:level-summary
-		utils.ReportDebugEvent("D", "test.go:585", "finished validation for level", map[string]interface{}{
-			"level":             level,
-			"candidateTxCount":  len(transactionsInLevel),
-			"validTxCount":      len(validTransactions),
-			"failedTxCount":     len(failedTxIDs),
-			"failedTxIDsSample": failedTxIDs,
-		})
+		// utils.ReportDebugEvent("D", "test.go:585", "finished validation for level", map[string]interface{}{
+		// 	"level":             level,
+		// 	"candidateTxCount":  len(transactionsInLevel),
+		// 	"validTxCount":      len(validTransactions),
+		// 	"failedTxCount":     len(failedTxIDs),
+		// 	"failedTxIDsSample": failedTxIDs,
+		// })
 		// #endregion
 
 		// 使用验证得到的增量更新逻辑合约存储，供后续层级重执行读取

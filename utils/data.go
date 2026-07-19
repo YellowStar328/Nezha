@@ -19,12 +19,50 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chinuy/zipf"
 	"github.com/panjf2000/ants"
 	"github.com/syndtr/goleveldb/leveldb"
 )
+
+type EVMInstance struct {
+	lvm          *levm.LEVM
+	contractAddr common.Address
+}
+
+var evmPool *sync.Pool
+var poolInitOnce sync.Once
+var evmPoolCounter int32
+
+func InitEVMPool(dbFile string, poolSize int) {
+	poolInitOnce.Do(func() {
+		evmPool = &sync.Pool{
+			New: func() interface{} {
+				counter := atomic.AddInt32(&evmPoolCounter, 1)
+
+				uniqueDBFile := fmt.Sprintf("%s_%d", dbFile, counter)
+
+				lvm := levm.New(uniqueDBFile, big.NewInt(0), common.Address{})
+				lvm.NewAccount(common.Address{}, big.NewInt(1e18))
+
+				_, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+					"./SmallBank/small_bank_sol_SmallBank.bin")
+				_, contractAddr, _, _ := lvm.DeployContract(common.Address{}, binData)
+
+				return &EVMInstance{
+					lvm:          lvm,
+					contractAddr: contractAddr,
+				}
+			},
+		}
+
+		for i := 0; i < poolSize; i++ {
+			evmPool.Put(evmPool.New())
+		}
+	})
+}
 
 // Transaction 表示一个预生成的交易
 type Transaction struct {
@@ -462,7 +500,7 @@ func SelectFunctions2(lvm *levm.LEVM, fromAddr common.Address, cAddr common.Addr
 		return rMap, wMap
 	case "sendPayment":
 		rMap, wMap, _, err := lvm.CallContractABI2(fromAddr, cAddr, big.NewInt(0), abiObject, "sendPayment",
-			strconv.FormatUint(addr1, 10), strconv.FormatUint(addr2, 10), big.NewInt(50))
+			strconv.FormatUint(addr1, 10), strconv.FormatUint(addr2, 10), big.NewInt(25))
 		if err != nil {
 			fmt.Println("get error : ", err)
 		}
@@ -657,35 +695,23 @@ func ReExecuteAndValidateTransactionWithState(
 	dbFile string,
 	logicalState map[string][]byte,
 ) (bool, map[string]*big.Int, error) {
-	// 加载合约 ABI 和二进制代码
-	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+	abiObject, _, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
 		"./SmallBank/small_bank_sol_SmallBank.bin")
 	if err != nil {
 		return false, nil, err
 	}
 
-	// 为每个交易创建独立的 EVM 实例，并用层间已提交的逻辑状态初始化合约存储
-	lvm := levm.New(dbFile, big.NewInt(0), ctx.FromAddr)
-	defer lvm.Close()
+	inst := evmPool.Get().(*EVMInstance)
+	defer evmPool.Put(inst)
 
-	// 为发送者账户充值（确保有足够的 Gas）
-	lvm.NewAccount(ctx.FromAddr, big.NewInt(1e18))
-
-	// 重新部署合约，得到本次重执行实际使用的合约地址
-	_, contractAddr, _, err := lvm.DeployContract(ctx.FromAddr, binData)
-	if err != nil {
+	if err := applyLogicalStateToContract(inst.lvm, inst.contractAddr, logicalState); err != nil {
 		return false, nil, err
 	}
+	inst.lvm.NewAccount(ctx.FromAddr, big.NewInt(1e18))
 
-	if err := applyLogicalStateToContract(lvm, contractAddr, logicalState); err != nil {
-		return false, nil, err
-	}
+	inst.lvm.NewEVM(big.NewInt(0), ctx.FromAddr)
 
-	// 重新创建 EVM 以刷新 tracer，避免部署和状态注入污染本次交易的读写集
-	lvm.NewEVM(big.NewInt(0), ctx.FromAddr)
-
-	// 重新执行交易并捕获新的写集
-	newRMap, newWMap := SelectFunctions2(lvm, ctx.FromAddr, contractAddr, abiObject, ctx.Function, ctx.Addr1, ctx.Addr2)
+	newRMap, newWMap := SelectFunctions2(inst.lvm, ctx.FromAddr, inst.contractAddr, abiObject, ctx.Function, ctx.Addr1, ctx.Addr2)
 
 	// 计算增量：写值 - 读值（处理 uint256 下溢）
 	two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)

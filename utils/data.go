@@ -729,3 +729,72 @@ func ReExecuteAndValidateTransactionWithState(
 	// 对比增量
 	return WriteDeltaEqual(ctx.PreWriteDelta, newWriteDelta), newWriteDelta, nil
 }
+
+// ReExecuteAndGetRealRWSet 基于当前逻辑状态重新执行交易，返回真实的读写键集合和写增量。
+// 用于在 Depurge 算法中对比真实读写集与保守读写集。
+func ReExecuteAndGetRealRWSet(
+	ctx *core.TransactionContext,
+	dbFile string,
+	logicalState map[string][]byte,
+) ([]string, []string, map[string]*big.Int, error) {
+	abiObject, _, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+		"./SmallBank/small_bank_sol_SmallBank.bin")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	inst := evmPool.Get().(*EVMInstance)
+	defer evmPool.Put(inst)
+
+	if err := applyLogicalStateToContract(inst.lvm, inst.contractAddr, logicalState); err != nil {
+		return nil, nil, nil, err
+	}
+	inst.lvm.NewAccount(ctx.FromAddr, big.NewInt(1e18))
+
+	inst.lvm.NewEVM(big.NewInt(0), ctx.FromAddr)
+
+	newRMap, newWMap := SelectFunctions2(inst.lvm, ctx.FromAddr, inst.contractAddr, abiObject, ctx.Function, ctx.Addr1, ctx.Addr2)
+
+	realReadKeys := make([]string, 0, len(newRMap))
+	for key := range newRMap {
+		realReadKeys = append(realReadKeys, core.ConvertByte2String(key.Bytes()))
+	}
+
+	realWriteKeys := make([]string, 0, len(newWMap))
+	for key := range newWMap {
+		realWriteKeys = append(realWriteKeys, core.ConvertByte2String(key.Bytes()))
+	}
+
+	two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
+	two255 := new(big.Int).Rsh(two256, 1)
+
+	newWriteDelta := make(map[string]*big.Int)
+	for key := range newWMap {
+		keyStr := core.ConvertByte2String(key.Bytes())
+		writeBig := new(big.Int).SetBytes(newWMap[key].Bytes())
+
+		var readBig *big.Int
+		if readVal, ok := newRMap[key]; ok {
+			readBig = new(big.Int).SetBytes(readVal.Bytes())
+		} else {
+			if currentVal, ok := logicalState[keyStr]; ok {
+				readBig = new(big.Int).SetBytes(currentVal)
+			} else {
+				readBig = big.NewInt(0)
+			}
+		}
+
+		delta := new(big.Int).Sub(writeBig, readBig)
+
+		if delta.Sign() < 0 {
+			delta = new(big.Int).Add(delta, two256)
+		}
+		if delta.Cmp(two255) >= 0 {
+			delta = new(big.Int).Sub(delta, two256)
+		}
+
+		newWriteDelta[keyStr] = delta
+	}
+
+	return realReadKeys, realWriteKeys, newWriteDelta, nil
+}

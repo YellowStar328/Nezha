@@ -87,9 +87,17 @@ func main() {
 		z := zipf.NewZipf(r, skew, addrNum)
 		addr1 := z.Uint64()
 		addr2 := z.Uint64()
+		addr3 := z.Uint64()
+		addr4 := z.Uint64()
 		// 确保 addr2 != addr1
 		for addr2 == addr1 {
 			addr2 = z.Uint64()
+		}
+		for addr3 == addr1 || addr3 == addr2 {
+			addr3 = z.Uint64()
+		}
+		for addr4 == addr3 || addr4 == addr1 || addr4 == addr2 {
+			addr4 = z.Uint64()
 		}
 		txList = []utils.Transaction{
 			{
@@ -99,8 +107,8 @@ func main() {
 			},
 			{
 				Function: "sendPayment",
-				Addr1:    addr1,
-				Addr2:    addr2,
+				Addr1:    addr3,
+				Addr2:    addr4,
 			},
 			{
 				Function: "sendPayment",
@@ -464,79 +472,373 @@ func TestAppConcurrency(txNum int, blksize int, con int, addrNum uint64, skew fl
 // TestDepurge test
 func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
 
-	// concurrently simulate transactions to capture read/write sets
 	txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
+
+	// if ctx1, ok := contexts["1"]; ok {
+	// 	if ctx3, ok := contexts["3"]; ok {
+	// 		for key, val := range ctx3.PreReadSet {
+	// 			ctx1.PreReadSet[key] = val
+	// 		}
+	// 		for key, val := range ctx3.PreWriteSet {
+	// 			ctx1.PreWriteSet[key] = val
+	// 		}
+	// 	}
+	// }
+
+	utils.InitEVMPool(dbFile, runtime.NumCPU())
 
 	start := time.Now()
 
-	// TODO: 在这里调用你的新算法
-	// 例如：
-	// newAlgo := core.NewNewAlgorithmData()
-	// commitOrder, abortedNum := newAlgo.ProcessTransactions(txs)
-
-	// 示例计时（根据你的算法调整）
 	start1 := time.Now()
-	// ... 算法第一部分 ...
-	scheduleOrder := core.Depurge_schedule(contexts)
-
+	scheduler, _ := core.Depurge_schedule(contexts)
 	duration1 := time.Since(start1)
 	writer.WriteString(fmt.Sprintf("Time of schedule: %s\n", duration1))
 
-	start2 := time.Now()
-	// ... 算法第二部分 ...
-	duration2 := time.Since(start2)
-	writer.WriteString(fmt.Sprintf("Time of your algorithm step 2: %s\n", duration2))
+	commitOrder := make(map[int32][][]*core.RWNode)
+	validationAborted := 0
+	committedState := make(map[string][]byte)
 
-	// TODO: 获取提交顺序和中止数量
-	// 示例：
-	// commitOrder := ...
-	// abortedNum := ...
+	type validatedTransaction struct {
+		txID         string
+		writeDelta   map[string]*big.Int
+		realRead     []string
+		realWrite    []string
+		conservative []string
+		prunedKeys   []string
+	}
+
+	start2 := time.Now()
+
+	levelIndex := int32(0)
+	totalPrunedKeys := 0
+
+	for scheduler.GetReadyQueueLen() > 0 {
+		currentLevelSize := scheduler.GetReadyQueueLen()
+		currentLevel := make([]string, 0, currentLevelSize)
+
+		for i := 0; i < currentLevelSize; i++ {
+			txID := scheduler.PopReady()
+			if txID == "" {
+				break
+			}
+			currentLevel = append(currentLevel, txID)
+		}
+
+		if len(currentLevel) == 0 {
+			continue
+		}
+
+		fmt.Printf("\nLevel %d: %d transactions ready - %v\n", levelIndex, len(currentLevel), currentLevel)
+
+		levelState := utils.CloneWriteSet(committedState)
+
+		var validTransactions []validatedTransaction
+		var validLock sync.Mutex
+		var abortLock sync.Mutex
+
+		var validateWg sync.WaitGroup
+		validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
+			txID := i.(string)
+
+			ctx, exists := contexts[txID]
+			if !exists {
+				abortLock.Lock()
+				validationAborted++
+				abortLock.Unlock()
+				validateWg.Done()
+				return
+			}
+
+			realReadKeys, realWriteKeys, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, levelState)
+			if err != nil {
+				abortLock.Lock()
+				validationAborted++
+				abortLock.Unlock()
+				validateWg.Done()
+				return
+			}
+
+			conservativeKeys := scheduler.GetConservativeKeys(txID)
+			conservativeKeySet := make(map[string]bool)
+			for _, k := range conservativeKeys {
+				conservativeKeySet[k] = true
+			}
+
+			realKeySet := make(map[string]bool)
+			for _, k := range realReadKeys {
+				realKeySet[k] = true
+			}
+			for _, k := range realWriteKeys {
+				realKeySet[k] = true
+			}
+
+			abort := false
+			for key := range realKeySet {
+				if !conservativeKeySet[key] {
+					abort = true
+					break
+				}
+			}
+
+			if abort {
+				abortLock.Lock()
+				validationAborted++
+				abortLock.Unlock()
+				validateWg.Done()
+				return
+			}
+
+			prunedKeys := make([]string, 0)
+			for _, key := range conservativeKeys {
+				if !realKeySet[key] {
+					prunedKeys = append(prunedKeys, key)
+				}
+			}
+			totalPrunedKeys += len(prunedKeys)
+
+			if len(prunedKeys) > 0 {
+				allRealKeys := append(realReadKeys, realWriteKeys...)
+				scheduler.Prune(txID, allRealKeys)
+			}
+
+			scheduler.Execute(txID)
+
+			validLock.Lock()
+			validTransactions = append(validTransactions, validatedTransaction{
+				txID:         txID,
+				writeDelta:   writeDelta,
+				realRead:     realReadKeys,
+				realWrite:    realWriteKeys,
+				conservative: conservativeKeys,
+				prunedKeys:   prunedKeys,
+			})
+			validLock.Unlock()
+
+			validateWg.Done()
+		})
+
+		for _, txID := range currentLevel {
+			validateWg.Add(1)
+			_ = validatePool.Invoke(txID)
+		}
+
+		validateWg.Wait()
+		validatePool.Release()
+
+		for _, validTx := range validTransactions {
+			if len(validTx.prunedKeys) > 0 {
+				fmt.Printf("  TX %s: pruned %d keys (%v) - conservative:%d, real:%d\n",
+					validTx.txID,
+					len(validTx.prunedKeys),
+					validTx.prunedKeys,
+					len(validTx.conservative),
+					len(validTx.realRead)+len(validTx.realWrite))
+			}
+		}
+
+		for scheduler.GetPruneReadyQueueLen() > 0 {
+			pruneReleasedCount := scheduler.GetPruneReadyQueueLen()
+			pruneReleasedTxs := make([]string, 0, pruneReleasedCount)
+			for i := 0; i < pruneReleasedCount; i++ {
+				txID := scheduler.PopPruneReady()
+				if txID != "" {
+					pruneReleasedTxs = append(pruneReleasedTxs, txID)
+				}
+			}
+			fmt.Printf("  %d transactions released by pruning: %v\n", pruneReleasedCount, pruneReleasedTxs)
+
+			var pruneValidTransactions []validatedTransaction
+			var pruneValidLock sync.Mutex
+			var pruneAbortLock sync.Mutex
+
+			var pruneValidateWg sync.WaitGroup
+			pruneValidatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
+				txID := i.(string)
+
+				ctx, exists := contexts[txID]
+				if !exists {
+					pruneAbortLock.Lock()
+					validationAborted++
+					pruneAbortLock.Unlock()
+					pruneValidateWg.Done()
+					return
+				}
+
+				realReadKeys, realWriteKeys, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, levelState)
+				if err != nil {
+					pruneAbortLock.Lock()
+					validationAborted++
+					pruneAbortLock.Unlock()
+					pruneValidateWg.Done()
+					return
+				}
+
+				conservativeKeys := scheduler.GetConservativeKeys(txID)
+				conservativeKeySet := make(map[string]bool)
+				for _, k := range conservativeKeys {
+					conservativeKeySet[k] = true
+				}
+
+				realKeySet := make(map[string]bool)
+				for _, k := range realReadKeys {
+					realKeySet[k] = true
+				}
+				for _, k := range realWriteKeys {
+					realKeySet[k] = true
+				}
+
+				abort := false
+				for key := range realKeySet {
+					if !conservativeKeySet[key] {
+						abort = true
+						break
+					}
+				}
+
+				if abort {
+					pruneAbortLock.Lock()
+					validationAborted++
+					pruneAbortLock.Unlock()
+					pruneValidateWg.Done()
+					return
+				}
+
+				prunedKeys := make([]string, 0)
+				for _, key := range conservativeKeys {
+					if !realKeySet[key] {
+						prunedKeys = append(prunedKeys, key)
+					}
+				}
+				totalPrunedKeys += len(prunedKeys)
+
+				if len(prunedKeys) > 0 {
+					allRealKeys := append(realReadKeys, realWriteKeys...)
+					scheduler.Prune(txID, allRealKeys)
+				}
+
+				scheduler.Execute(txID)
+
+				pruneValidLock.Lock()
+				pruneValidTransactions = append(pruneValidTransactions, validatedTransaction{
+					txID:         txID,
+					writeDelta:   writeDelta,
+					realRead:     realReadKeys,
+					realWrite:    realWriteKeys,
+					conservative: conservativeKeys,
+					prunedKeys:   prunedKeys,
+				})
+				pruneValidLock.Unlock()
+
+				pruneValidateWg.Done()
+			})
+
+			for _, txID := range pruneReleasedTxs {
+				pruneValidateWg.Add(1)
+				_ = pruneValidatePool.Invoke(txID)
+			}
+
+			pruneValidateWg.Wait()
+			pruneValidatePool.Release()
+
+			for _, validTx := range pruneValidTransactions {
+				if len(validTx.prunedKeys) > 0 {
+					fmt.Printf("  TX %s: pruned %d keys (%v) - conservative:%d, real:%d\n",
+						validTx.txID,
+						len(validTx.prunedKeys),
+						validTx.prunedKeys,
+						len(validTx.conservative),
+						len(validTx.realRead)+len(validTx.realWrite))
+				}
+			}
+
+			validTransactions = append(validTransactions, pruneValidTransactions...)
+		}
+
+		for _, validTx := range validTransactions {
+			for _, v := range txs {
+				if len(v) > 0 && v[0].TransInfo.ID == validTx.txID {
+					var wNodes []*core.RWNode
+					for _, n := range v {
+						if n.Label == "w" {
+							wNodes = append(wNodes, n)
+						}
+					}
+					commitOrder[levelIndex] = append(commitOrder[levelIndex], wNodes)
+					break
+				}
+			}
+		}
+
+		two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
+		for _, tx := range validTransactions {
+			for key, delta := range tx.writeDelta {
+				var currentBig *big.Int
+				if currentVal, ok := committedState[key]; ok {
+					currentBig = new(big.Int).SetBytes(currentVal)
+				} else {
+					currentBig = big.NewInt(0)
+				}
+				newVal := new(big.Int).Add(currentBig, delta)
+
+				if newVal.Sign() < 0 {
+					newVal = new(big.Int).Add(newVal, two256)
+				}
+
+				committedState[key] = newVal.Bytes()
+			}
+		}
+
+		levelIndex++
+	}
+
+	duration2 := time.Since(start2)
+	writer.WriteString(fmt.Sprintf("Time of validation and execution: %s\n", duration2))
+	writer.WriteString(fmt.Sprintf("Total pruned keys: %d\n", totalPrunedKeys))
 
 	var keys []int
-	// TODO: 准备提交的键
-	// for seq := range commitOrder {
-	// 	keys = append(keys, int(seq))
-	// }
+	for seq := range commitOrder {
+		keys = append(keys, int(seq))
+	}
 	sort.Ints(keys)
 
-	db := OpenDB(dbFile) // TODO: 为新算法选择合适的数据库文件（如 dbFile6 等）
+	db := OpenDB(dbFile)
+	startCommit := time.Now()
 
-	start4 := time.Now()
-	// commit transactions
 	var wg sync.WaitGroup
 	p, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
 		n := i.([]*core.RWNode)
 		for _, rw := range n {
-			acc := core.CreateAccount(rw.RWSet.Key, rw.RWSet.Value)
-			err := utils.StoreState(db, acc)
-			if err != nil {
-				log.Panic(err)
+			keyStr := core.ConvertByte2String(rw.RWSet.Key)
+			if finalVal, ok := committedState[keyStr]; ok {
+				acc := core.CreateAccount(rw.RWSet.Key, finalVal)
+				err := utils.StoreState(db, acc)
+				if err != nil {
+					log.Panic(err)
+				}
 			}
 		}
 		wg.Done()
 	})
 	defer p.Release()
 
-	// TODO: 提交交易（根据你的 commitOrder 结构调整）
-	// for _, n := range keys {
-	// 	for _, v := range commitOrder[int32(n)] {
-	// 		if len(v) > 0 {
-	// 			wg.Add(1)
-	// 			_ = p.Invoke(v)
-	// 		}
-	// 	}
-	// 	wg.Wait()
-	// }
+	for _, n := range keys {
+		for _, v := range commitOrder[int32(n)] {
+			if len(v) > 0 {
+				wg.Add(1)
+				_ = p.Invoke(v)
+			}
+		}
+		wg.Wait()
+	}
 
-	duration4 := time.Since(start4)
-	writer.WriteString(fmt.Sprintf("Time of committing transactions: %s\n", duration4))
+	durationCommit := time.Since(startCommit)
+	writer.WriteString(fmt.Sprintf("Time of committing transactions: %s\n", durationCommit))
 
 	duration := time.Since(start)
-	// TODO: 替换为实际的中止数量
-	count := 0 // newAlgo.GetAbortedNums()
 
-	writer.WriteString(fmt.Sprintf("Abort rate is: %.3f\n", float64(count)/float64(len(txs))))
-	writer.WriteString(fmt.Sprintf("Time of processing TXs on your new algorithm: %s\n", duration))
+	writer.WriteString(fmt.Sprintf("Validation aborted: %d\n", validationAborted))
+	writer.WriteString(fmt.Sprintf("Abort rate is: %.3f\n", float64(validationAborted)/float64(len(txs))))
+	writer.WriteString(fmt.Sprintf("Time of processing TXs on Depurge: %s\n", duration))
 	writer.WriteString(fmt.Sprintf("===================================================\n"))
 	writer.Flush()
 }

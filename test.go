@@ -159,7 +159,7 @@ func TestSimulation(txList []utils.Transaction, writer *bufio.Writer) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	var wg sync.WaitGroup
-	p, _ := ants.NewPoolWithFunc(100000, func(i interface{}) {
+	p, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
 		n := i.(int)
 		lvm := evmPools[n]
 		fromAddr := fromAddress[n]
@@ -466,7 +466,7 @@ func TestNewAlgorithm(txList []utils.Transaction, writer *bufio.Writer, dbFile s
 	start4 := time.Now()
 	// commit transactions
 	var wg sync.WaitGroup
-	p, _ := ants.NewPoolWithFunc(2000, func(i interface{}) {
+	p, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
 		n := i.([]*core.RWNode)
 		for _, rw := range n {
 			acc := core.CreateAccount(rw.RWSet.Key, rw.RWSet.Value)
@@ -562,7 +562,7 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 
 		// 当前层级的并行验证
 		var validateWg sync.WaitGroup
-		validatePool, _ := ants.NewPoolWithFunc(2000, func(i interface{}) {
+		validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
 			wNodes := i.([]*core.RWNode)
 			if len(wNodes) == 0 {
 				validateWg.Done()

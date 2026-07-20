@@ -287,14 +287,9 @@ func ConCaptureRWSetWithTransactions(
 	rwNodes [][]*core.RWNode,
 	contexts map[string]*core.TransactionContext,
 ) {
-	var evmPools []*levm.LEVM
-	var fromAddress []common.Address
-	var cAddress []common.Address
 	var txs [][]*core.RWNode
-
 	txNum := len(txList)
 
-	// 根据参数决定是否初始化 contexts
 	shouldCapture := len(captureContext) > 0 && captureContext[0]
 	if shouldCapture {
 		contexts = make(map[string]*core.TransactionContext)
@@ -305,35 +300,27 @@ func ConCaptureRWSetWithTransactions(
 	if err != nil {
 		fmt.Println(err)
 	}
-	//随机地址充值1e8 wei
-	for i := 0; i < txNum; i++ {
-		fromAddr := tools.NewRandomAddress()
-		fromAddress = append(fromAddress, fromAddr)
-		// create EVM instances
-		lvm := levm.New(dbFile, big.NewInt(0), fromAddr)
-		lvm.NewAccount(fromAddr, big.NewInt(1e18))
-
-		evmPools = append(evmPools, lvm)
-
-		_, addr, _, err := lvm.DeployContract(fromAddr, binData)
-		if err != nil {
-			fmt.Println(err)
-		}
-		cAddress = append(cAddress, addr)
-	}
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	var wg sync.WaitGroup
 	var lock sync.Mutex
-	//var rw = make(chan []*core.RWNode, txNum)
 
-	p, _ := ants.NewPoolWithFunc(100000, func(i interface{}) {
+	p, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
 		n := i.(int)
-		lvm := evmPools[n]
-		fromAddr := fromAddress[n]
-		addr := cAddress[n]
 		tx := txList[n]
+
+		fromAddr := tools.NewRandomAddress()
+		lvm := levm.New(dbFile, big.NewInt(0), fromAddr)
+		lvm.NewAccount(fromAddr, big.NewInt(1e18))
+		defer lvm.Close()
+
+		_, addr, _, err := lvm.DeployContract(fromAddr, binData)
+		if err != nil {
+			fmt.Println(err)
+			wg.Done()
+			return
+		}
 
 		rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, tx.Function, tx.Addr1, tx.Addr2)
 
@@ -398,12 +385,6 @@ func ConCaptureRWSetWithTransactions(
 	}
 
 	wg.Wait()
-
-	for _, lvm := range evmPools {
-		if lvm != nil {
-			_ = lvm.Close()
-		}
-	}
 
 	// 按照交易顺序重新排序（因为并发执行可能导致顺序混乱）
 	sortedTxs := make([][]*core.RWNode, txNum)

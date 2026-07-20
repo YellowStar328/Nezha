@@ -43,12 +43,22 @@ func main() {
 	var blksize int
 	var con int
 	var testMode bool
+	var all bool
+	var serial bool
+	var Nezha bool
+	var NezhaVariable bool
+	var CG bool
 	flag.Uint64Var(&addrNum, "a", 10000, "specify address number to use. defaults to 10000.")
 	flag.IntVar(&txNum, "t", 200, "specify transaction number to use. defaults to 100.")
 	flag.Float64Var(&skew, "s", 0.6, "specify skew to use. defaults to 0.6.")
 	flag.IntVar(&blksize, "b", 200, "specify block size to use. defaults to 200.")
 	flag.IntVar(&con, "c", 4, "specify block size to use. defaults to 4.")
 	flag.BoolVar(&testMode, "test", false, "specify test mode to use. defaults to false.")
+	flag.BoolVar(&all, "all", true, "specify all mode to use. defaults to true.")
+	flag.BoolVar(&serial, "serial", false, "specify serial mode to use. defaults to false.")
+	flag.BoolVar(&Nezha, "Nezha", false, "specify Nezha mode to use. defaults to false.")
+	flag.BoolVar(&NezhaVariable, "NezhaVariable", false, "specify NezhaVariable mode to use. defaults to false.")
+	flag.BoolVar(&CG, "CG", false, "specify CG mode to use. defaults to false.")
 	flag.Parse()
 
 	// 清理旧的数据库，确保每次测试从零开始
@@ -103,13 +113,28 @@ func main() {
 		txList = utils.GenerateTransactions(addrNum, txNum, skew, 12345)
 	}
 
-	TestSerialExecution(txList, w)
-	TestConflictQueue(txList, w, dbFile4)
-	TestConflictGraph(txList, w, dbFile4)
-	TestSimulation(txList, w)
-	// TODO: 取消下面的注释来运行你的新算法测试
-	// TestNewAlgorithm(txList, w, dbFile7)
-	TestNezhaVariable(txList, w, dbFile8)
+	if all {
+		TestSerialExecution(txList, w)
+		TestConflictQueue(txList, w, dbFile1)
+		TestConflictGraph(txList, w, dbFile2)
+		TestSimulation(txList, w)
+		// TODO: 取消下面的注释来运行你的新算法测试
+		// TestNewAlgorithm(txList, w, dbFile7)
+		TestNezhaVariable(txList, w, dbFile8)
+	} else {
+		TestSerialExecution(txList, w)
+		TestSimulation(txList, w)
+		if Nezha {
+			TestConflictQueue(txList, w, dbFile1)
+		}
+		if NezhaVariable {
+			TestNezhaVariable(txList, w, dbFile8)
+		}
+		if CG {
+			TestConflictGraph(txList, w, dbFile2)
+		}
+	}
+
 }
 
 // CleanupDatabases 删除所有旧的数据库目录，确保每次测试从零开始

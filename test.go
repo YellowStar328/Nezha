@@ -48,17 +48,19 @@ func main() {
 	var Nezha bool
 	var NezhaVariable bool
 	var CG bool
+	var benchmark bool
 	flag.Uint64Var(&addrNum, "a", 10000, "specify address number to use. defaults to 10000.")
 	flag.IntVar(&txNum, "t", 200, "specify transaction number to use. defaults to 100.")
 	flag.Float64Var(&skew, "s", 0.6, "specify skew to use. defaults to 0.6.")
 	flag.IntVar(&blksize, "b", 200, "specify block size to use. defaults to 200.")
 	flag.IntVar(&con, "c", 4, "specify block size to use. defaults to 4.")
 	flag.BoolVar(&testMode, "test", false, "specify test mode to use. defaults to false.")
-	flag.BoolVar(&all, "all", true, "specify all mode to use. defaults to true.")
+	flag.BoolVar(&all, "all", false, "specify all mode to use. defaults to true.")
 	flag.BoolVar(&serial, "serial", false, "specify serial mode to use. defaults to false.")
 	flag.BoolVar(&Nezha, "Nezha", false, "specify Nezha mode to use. defaults to false.")
 	flag.BoolVar(&NezhaVariable, "NezhaVariable", false, "specify NezhaVariable mode to use. defaults to false.")
 	flag.BoolVar(&CG, "CG", false, "specify CG mode to use. defaults to false.")
+	flag.BoolVar(&benchmark, "benchmark", false, "specify benchmark mode to use. defaults to false.")
 	flag.Parse()
 
 	// 清理旧的数据库，确保每次测试从零开始
@@ -122,8 +124,11 @@ func main() {
 		// TestNewAlgorithm(txList, w, dbFile7)
 		TestNezhaVariable(txList, w, dbFile8)
 	} else {
-		TestSerialExecution(txList, w)
+		if benchmark {
+			TestSerialExecution(txList, w)
+		}
 		TestSimulation(txList, w)
+
 		if Nezha {
 			TestConflictQueue(txList, w, dbFile1)
 		}

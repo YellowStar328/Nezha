@@ -32,7 +32,7 @@ const dbFile3 = "DAG_Serial"
 const dbFile4 = "DAG_Sim"
 const dbFile5 = "DAG_Con"
 const dbFile6 = "Eth_Test"
-const dbFile7 = "DAG_NewAlgorithm"  // 为新算法预留的数据库
+const dbFile7 = "DAG_Depurge"       // 为Depurge算法预留的数据库
 const dbFile8 = "DAG_NezhaVariable" // 为 Nezha_variable 算法预留的数据库
 const fileName = "Exp_results.txt"
 
@@ -48,6 +48,7 @@ func main() {
 	var Nezha bool
 	var NezhaVariable bool
 	var CG bool
+	var Depurge bool
 	var benchmark bool
 	flag.Uint64Var(&addrNum, "a", 10000, "specify address number to use. defaults to 10000.")
 	flag.IntVar(&txNum, "t", 200, "specify transaction number to use. defaults to 100.")
@@ -60,6 +61,7 @@ func main() {
 	flag.BoolVar(&Nezha, "Nezha", false, "specify Nezha mode to use. defaults to false.")
 	flag.BoolVar(&NezhaVariable, "NezhaVariable", false, "specify NezhaVariable mode to use. defaults to false.")
 	flag.BoolVar(&CG, "CG", false, "specify CG mode to use. defaults to false.")
+	flag.BoolVar(&Depurge, "Depurge", false, "specify Depurge mode mode to use. defaults to false.")
 	flag.BoolVar(&benchmark, "benchmark", false, "specify benchmark mode to use. defaults to false.")
 	flag.Parse()
 
@@ -121,7 +123,7 @@ func main() {
 		TestConflictGraph(txList, w, dbFile2)
 		TestSimulation(txList, w)
 		// TODO: 取消下面的注释来运行你的新算法测试
-		// TestNewAlgorithm(txList, w, dbFile7)
+		TestDepurge(txList, w, dbFile7)
 		TestNezhaVariable(txList, w, dbFile8)
 	} else {
 		if benchmark {
@@ -137,6 +139,9 @@ func main() {
 		}
 		if CG {
 			TestConflictGraph(txList, w, dbFile2)
+		}
+		if Depurge {
+			TestDepurge(txList, w, dbFile7)
 		}
 	}
 
@@ -456,10 +461,11 @@ func TestAppConcurrency(txNum int, blksize int, con int, addrNum uint64, skew fl
 	fmt.Printf("Abort rate is: %.3f\n", float64(count)/float64(txNum))
 }
 
-// TestNewAlgorithm test your new concurrency control algorithm
-func TestNewAlgorithm(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
+// TestDepurge test
+func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
+
 	// concurrently simulate transactions to capture read/write sets
-	txs, _ := utils.ConCaptureRWSetWithTransactions(txList, dbFile)
+	txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
 
 	start := time.Now()
 
@@ -471,8 +477,10 @@ func TestNewAlgorithm(txList []utils.Transaction, writer *bufio.Writer, dbFile s
 	// 示例计时（根据你的算法调整）
 	start1 := time.Now()
 	// ... 算法第一部分 ...
+	scheduleOrder := core.Depurge_schedule(contexts)
+
 	duration1 := time.Since(start1)
-	writer.WriteString(fmt.Sprintf("Time of your algorithm step 1: %s\n", duration1))
+	writer.WriteString(fmt.Sprintf("Time of schedule: %s\n", duration1))
 
 	start2 := time.Now()
 	// ... 算法第二部分 ...

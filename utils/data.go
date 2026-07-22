@@ -511,7 +511,7 @@ func SelectFunctions2(lvm *levm.LEVM, fromAddr common.Address, cAddr common.Addr
 		return rMap, wMap
 	case "writeCheck":
 		rMap, wMap, _, err := lvm.CallContractABI2(fromAddr, cAddr, big.NewInt(0), abiObject, "writeCheck",
-			strconv.FormatUint(addr2, 10), big.NewInt(20))
+			strconv.FormatUint(addr1, 10), big.NewInt(20))
 		if err != nil {
 			fmt.Println("get error : ", err)
 		}

@@ -143,16 +143,16 @@ func main() {
 		if Nezha {
 			TestConflictQueue(txList, w, dbFile1)
 		}
-
+		if Depurge {
+			TestDepurge(txList, w, dbFile7)
+		}
 		if NezhaVariable {
 			TestNezhaVariable(txList, w, dbFile8)
 		}
 		if CG {
 			TestConflictGraph(txList, w, dbFile2)
 		}
-		if Depurge {
-			TestDepurge(txList, w, dbFile7)
-		}
+
 	}
 
 }
@@ -493,7 +493,7 @@ func TestAppConcurrency(txNum int, blksize int, con int, addrNum uint64, skew fl
 // TestDepurge test
 func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
 
-	utils.PreAnalyzeContract([]string{"almagate", "getBalance", "updateBalance", "updateSaving", "sendPayment", "writeCheck"})
+	utils.PreAnalyzeContract([]string{"writeCheck", "almagate", "getBalance", "updateBalance", "updateSaving", "sendPayment"})
 
 	// txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
 	txs, contexts := utils.LLMCaptureRWSet(txList, dbFile, true)
@@ -587,8 +587,8 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 			}
 
 			conservativeKeys := scheduler.GetConservativeKeys(txID)
-			fmt.Printf("  TX %s: conservative keys=%v, real read keys=%v, real write keys=%v\n",
-				txID, conservativeKeys, realReadKeys, realWriteKeys)
+			// fmt.Printf("  TX %s: conservative keys=%v, real read keys=%v, real write keys=%v\n",
+			// 	txID, conservativeKeys, realReadKeys, realWriteKeys)
 			conservativeKeySet := make(map[string]bool)
 			for _, k := range conservativeKeys {
 				conservativeKeySet[k] = true
@@ -611,7 +611,8 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 			}
 
 			if abort {
-				fmt.Printf("  TX %s: aborted (real keys exceed conservative keys)\n", txID)
+				fmt.Printf("  TX %s: aborted (real keys exceed conservative keys) - function=%s, addr1=%d, addr2=%d\n",
+					txID, ctx.Function, ctx.Addr1, ctx.Addr2)
 				abortLock.Lock()
 				validationAborted++
 				abortLock.Unlock()
@@ -743,7 +744,8 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 				}
 
 				if abort {
-					fmt.Printf("  TX %s: aborted (real keys exceed conservative keys)\n", txID)
+					fmt.Printf("  TX %s: aborted (real keys exceed conservative keys) - function=%s, addr1=%d, addr2=%d\n",
+						txID, ctx.Function, ctx.Addr1, ctx.Addr2)
 					pruneAbortLock.Lock()
 					validationAborted++
 					pruneAbortLock.Unlock()

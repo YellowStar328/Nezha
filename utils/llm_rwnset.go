@@ -46,7 +46,7 @@ type LLMConfig struct {
 
 var llmConfig = LLMConfig{
 	APIEndpoint: "https://api.deepseek.com/chat/completions",
-	APIKey:      "sk-8a48cd2d7cdc421d8211f110f759e730",
+	APIKey:      "sk-e788e33be40844c5a56c74bcda30cd95",
 	MaxRetries:  3,
 	Timeout:     30 * time.Second,
 	Concurrency: 5,

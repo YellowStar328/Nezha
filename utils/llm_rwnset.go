@@ -20,11 +20,6 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-const (
-	SmallBankSavingSlot   = 0
-	SmallBankCheckingSlot = 1
-)
-
 type LLMRequest struct {
 	Function string `json:"function"`
 	Addr1    uint64 `json:"addr1"`
@@ -50,8 +45,8 @@ type LLMConfig struct {
 }
 
 var llmConfig = LLMConfig{
-	APIEndpoint: "http://localhost:8080/v1/chat/completions",
-	APIKey:      "",
+	APIEndpoint: "https://api.deepseek.com/chat/completions",
+	APIKey:      "sk-8a48cd2d7cdc421d8211f110f759e730",
 	MaxRetries:  3,
 	Timeout:     30 * time.Second,
 	Concurrency: 5,
@@ -63,26 +58,41 @@ func SetLLMConfig(config LLMConfig) {
 
 var llmCache sync.Map
 
-func getStorageKey(accountID uint64, field string) []byte {
-	accountStr := strconv.FormatUint(accountID, 10)
-
-	var mappingSlot uint64
-	if field == "saving" || field == "savings" || field == "balance" && strings.Contains(field, "saving") {
-		mappingSlot = SmallBankSavingSlot
-	} else {
-		mappingSlot = SmallBankCheckingSlot
-	}
-
-	paddedAccount := common.RightPadBytes([]byte(accountStr), 32)
-	paddedSlot := common.LeftPadBytes(big.NewInt(int64(mappingSlot)).Bytes(), 32)
-
-	data := append(paddedAccount, paddedSlot...)
-	hash := sha3.NewLegacyKeccak256()
-	hash.Write(data)
-	return hash.Sum(nil)
+func ClearLLMCache() {
+	llmCache = sync.Map{}
 }
 
-func buildLLMPrompt(function string, addr1, addr2 uint64) string {
+func getStorageKey(accountID uint64, field string) []byte {
+	var mappingSlot uint64
+	switch field {
+	case "saving":
+		mappingSlot = 0
+	case "checking":
+		mappingSlot = 1
+	default:
+		mappingSlot = 1
+	}
+
+	// Solidity mapping key类型是string，key encoding = 原始字节，不做任何哈希/补齐
+	key := strconv.FormatUint(accountID, 10)
+	keyBytes := []byte(key)
+
+	slotBytes := common.LeftPadBytes(
+		big.NewInt(int64(mappingSlot)).Bytes(),
+		32,
+	)
+
+	// keccak256(key_bytes . pad32(slot))  —— 只有这一次哈希
+	data := append(keyBytes, slotBytes...)
+
+	h := sha3.NewLegacyKeccak256()
+	h.Write(data)
+	return h.Sum(nil)
+}
+
+var ErrNotPreAnalyzed = fmt.Errorf("function not pre-analyzed")
+
+func buildLLMPrompt(function string) string {
 	contractCode := `pragma solidity >=0.4.0 <0.7.0;
 contract SmallBank {
     mapping(string => uint256) savingStore;  // slot 0
@@ -143,11 +153,17 @@ contract SmallBank {
 合约代码：
 %s
 
-当前调用：%s("%d", "%d")
+参数映射规则：
+- almagate: arg0=addr1, arg1=addr2
+- getBalance: arg0=addr1
+- updateBalance: arg0=addr1
+- updateSaving: arg0=addr1
+- sendPayment: arg0=addr1, arg1=addr2
+- writeCheck: arg0=addr1
 
 请返回保守的读写集（包含所有可能访问的存储位置，即使在某些条件下可能不被访问）。
 
-返回格式要求（JSON格式，只返回JSON）：
+返回格式要求（JSON格式，只返回保守读写集JSON）：
 {
   "reads": [
     {"account": "addr1", "field": "checking"},
@@ -163,16 +179,17 @@ contract SmallBank {
 - "saving" - 对应 savingStore
 
 注意：
-1. 保守分析意味着包含所有可能被访问的存储位置
-2. 不要遗漏任何可能的分支路径
-3. 只返回JSON，不要包含其他文字`, function, contractCode, function, addr1, addr2)
+1. account 只能是 "addr1" 或 "addr2"
+2. 保守分析意味着包含所有可能被访问的存储位置
+3. 不要遗漏任何可能的分支路径
+4. 只返回JSON，不要包含其他文字`, function, contractCode)
 
 	return prompt
 }
 
 func callLLM(prompt string) (*LLMResponse, error) {
 	reqBody := map[string]interface{}{
-		"model": "gpt-4o-mini",
+		"model": "deepseek-v4-flash",
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
@@ -264,24 +281,42 @@ func callLLM(prompt string) (*LLMResponse, error) {
 		return nil, fmt.Errorf("failed to parse LLM response: %v, content: %s", err, content)
 	}
 
+	fmt.Printf("LLM parsed response: reads=%+v, writes=%+v\n", llmResp.Reads, llmResp.Writes)
+
 	return &llmResp, nil
 }
 
+func PreAnalyzeContract(functions []string) error {
+	for _, function := range functions {
+		if _, ok := llmCache.Load(function); ok {
+			fmt.Printf("Function %s already analyzed, skipping\n", function)
+			continue
+		}
+
+		fmt.Printf("Pre-analyzing function: %s\n", function)
+		prompt := buildLLMPrompt(function)
+		resp, err := callLLM(prompt)
+		if err != nil {
+			fmt.Printf("Pre-analysis failed for %s: %v\n", function, err)
+			return err
+		}
+
+		llmCache.Store(function, resp)
+		fmt.Printf("Pre-analysis completed for %s: reads=%d, writes=%d\n", function, len(resp.Reads), len(resp.Writes))
+	}
+
+	fmt.Println("Pre-analysis of all functions completed")
+	return nil
+}
+
 func analyzeTransactionLLM(tx Transaction) (*LLMResponse, error) {
-	cacheKey := fmt.Sprintf("%s_%d_%d", tx.Function, tx.Addr1, tx.Addr2)
+	cacheKey := tx.Function
 
 	if cached, ok := llmCache.Load(cacheKey); ok {
 		return cached.(*LLMResponse), nil
 	}
 
-	prompt := buildLLMPrompt(tx.Function, tx.Addr1, tx.Addr2)
-	resp, err := callLLM(prompt)
-	if err != nil {
-		return nil, err
-	}
-
-	llmCache.Store(cacheKey, resp)
-	return resp, nil
+	return nil, ErrNotPreAnalyzed
 }
 
 func llmResponseToRWSet(resp *LLMResponse, addr1, addr2 uint64) ([][]byte, [][]byte, [][]byte, [][]byte) {
@@ -396,7 +431,6 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 		txs = append(txs, rwNodes)
 
 		if shouldCapture {
-			fromAddr := tools.NewRandomAddress()
 			ctx := &core.TransactionContext{
 				TxID:        strconv.FormatInt(int64(n), 10),
 				Function:    tx.Function,
@@ -404,7 +438,7 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 				Addr2:       tx.Addr2,
 				PreReadSet:  make(map[string][]byte),
 				PreWriteSet: make(map[string][]byte),
-				FromAddr:    fromAddr,
+				FromAddr:    tools.NewRandomAddress(),
 			}
 
 			for i := range rAddr {

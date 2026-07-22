@@ -33,35 +33,58 @@ type EVMInstance struct {
 }
 
 var evmPool *sync.Pool
-var poolInitOnce sync.Once
+var evmPoolInstances []*EVMInstance
 var evmPoolCounter int32
 
+func CloseEVMPool() {
+	if evmPool == nil {
+		return
+	}
+	fmt.Printf("CloseEVMPool: closing %d instances\n", len(evmPoolInstances))
+	for _, inst := range evmPoolInstances {
+		inst.lvm.Close()
+	}
+	evmPoolInstances = nil
+	evmPool = nil
+}
+
 func InitEVMPool(dbFile string, poolSize int) {
-	poolInitOnce.Do(func() {
-		evmPool = &sync.Pool{
-			New: func() interface{} {
-				counter := atomic.AddInt32(&evmPoolCounter, 1)
+	CloseEVMPool()
 
-				uniqueDBFile := fmt.Sprintf("%s_%d", dbFile, counter)
+	fmt.Printf("InitEVMPool: creating pool with dbFile=%s, poolSize=%d\n", dbFile, poolSize)
 
-				lvm := levm.New(uniqueDBFile, big.NewInt(0), common.Address{})
-				lvm.NewAccount(common.Address{}, big.NewInt(1e18))
+	evmPoolCounter = 0
+	evmPoolInstances = make([]*EVMInstance, 0, poolSize)
 
-				_, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-					"./SmallBank/small_bank_sol_SmallBank.bin")
-				_, contractAddr, _, _ := lvm.DeployContract(common.Address{}, binData)
+	evmPool = &sync.Pool{
+		New: func() interface{} {
+			counter := atomic.AddInt32(&evmPoolCounter, 1)
 
-				return &EVMInstance{
-					lvm:          lvm,
-					contractAddr: contractAddr,
-				}
-			},
-		}
+			uniqueDBFile := fmt.Sprintf("%s_%d", dbFile, counter)
 
-		for i := 0; i < poolSize; i++ {
-			evmPool.Put(evmPool.New())
-		}
-	})
+			fmt.Printf("  Creating EVM instance %d with dbFile=%s\n", counter, uniqueDBFile)
+
+			lvm := levm.New(uniqueDBFile, big.NewInt(0), common.Address{})
+			lvm.NewAccount(common.Address{}, big.NewInt(1e18))
+
+			_, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+				"./SmallBank/small_bank_sol_SmallBank.bin")
+			_, contractAddr, _, _ := lvm.DeployContract(common.Address{}, binData)
+
+			inst := &EVMInstance{
+				lvm:          lvm,
+				contractAddr: contractAddr,
+			}
+			evmPoolInstances = append(evmPoolInstances, inst)
+			return inst
+		},
+	}
+
+	for i := 0; i < poolSize; i++ {
+		evmPool.Put(evmPool.New())
+	}
+
+	fmt.Printf("InitEVMPool: created %d instances\n", poolSize)
 }
 
 // Transaction 表示一个预生成的交易
@@ -467,7 +490,7 @@ func SelectFunctions2(lvm *levm.LEVM, fromAddr common.Address, cAddr common.Addr
 		return rMap, wMap
 	case "updateBalance":
 		rMap, wMap, _, err := lvm.CallContractABI2(fromAddr, cAddr, big.NewInt(0), abiObject, "updateBalance",
-			strconv.FormatUint(addr2, 10), big.NewInt(100))
+			strconv.FormatUint(addr1, 10), big.NewInt(100))
 		if err != nil {
 			fmt.Println("get error : ", err)
 		}

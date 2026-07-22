@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"sync"
@@ -102,8 +103,8 @@ func main() {
 		txList = []utils.Transaction{
 			{
 				Function: "updateBalance",
-				Addr1:    addr2,
-				Addr2:    addr1,
+				Addr1:    addr1,
+				Addr2:    addr2,
 			},
 			{
 				Function: "sendPayment",
@@ -142,6 +143,7 @@ func main() {
 		if Nezha {
 			TestConflictQueue(txList, w, dbFile1)
 		}
+
 		if NezhaVariable {
 			TestNezhaVariable(txList, w, dbFile8)
 		}
@@ -165,6 +167,25 @@ func CleanupDatabases() {
 			log.Printf("Cleaned up database: %s", dbFile)
 		}
 	}
+
+	dbFilesPatterns := []string{dbFile7 + "_*", dbFile8 + "_*"}
+	for _, pattern := range dbFilesPatterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			log.Printf("Warning: could not glob %s: %v", pattern, err)
+			continue
+		}
+		for _, match := range matches {
+			if err := os.RemoveAll(match); err != nil {
+				log.Printf("Warning: could not remove %s: %v", match, err)
+			} else {
+				log.Printf("Cleaned up database: %s", match)
+			}
+		}
+	}
+
+	utils.ClearLLMCache()
+	log.Printf("Cleaned up LLM cache")
 }
 
 // TestSimulation test concurrent transaction simulations
@@ -472,25 +493,26 @@ func TestAppConcurrency(txNum int, blksize int, con int, addrNum uint64, skew fl
 // TestDepurge test
 func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
 
-	txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
+	utils.PreAnalyzeContract([]string{"almagate", "getBalance", "updateBalance", "updateSaving", "sendPayment", "writeCheck"})
 
-	if ctx1, ok := contexts["1"]; ok {
-		if ctx3, ok := contexts["3"]; ok {
-			// ctx1.PreReadSet = make(map[string][]byte) // 或你实际使用的类型
-			// ctx1.PreWriteSet = make(map[string][]byte)
+	// txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
+	txs, contexts := utils.LLMCaptureRWSet(txList, dbFile, true)
 
-			for key, val := range ctx3.PreReadSet {
-				ctx1.PreReadSet[key] = val
-			}
-			for key, val := range ctx3.PreWriteSet {
-				ctx1.PreWriteSet[key] = val
-			}
-		}
-	}
+	// if ctx1, ok := contexts["1"]; ok {
+	// 	if ctx3, ok := contexts["3"]; ok {
+	// 		// ctx1.PreReadSet = make(map[string][]byte) // 或你实际使用的类型
+	// 		// ctx1.PreWriteSet = make(map[string][]byte)
+
+	// 		for key, val := range ctx3.PreReadSet {
+	// 			ctx1.PreReadSet[key] = val
+	// 		}
+	// 		for key, val := range ctx3.PreWriteSet {
+	// 			ctx1.PreWriteSet[key] = val
+	// 		}
+	// 	}
+	// }
 	utils.InitEVMPool(dbFile, runtime.NumCPU())
-
 	start := time.Now()
-
 	start1 := time.Now()
 	scheduler, _ := core.Depurge_schedule(contexts)
 	duration1 := time.Since(start1)
@@ -507,6 +529,7 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 		realWrite    []string
 		conservative []string
 		prunedKeys   []string
+		realKeySet   map[string]bool
 	}
 
 	start2 := time.Now()
@@ -564,6 +587,8 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 			}
 
 			conservativeKeys := scheduler.GetConservativeKeys(txID)
+			fmt.Printf("  TX %s: conservative keys=%v, real read keys=%v, real write keys=%v\n",
+				txID, conservativeKeys, realReadKeys, realWriteKeys)
 			conservativeKeySet := make(map[string]bool)
 			for _, k := range conservativeKeys {
 				conservativeKeySet[k] = true
@@ -618,6 +643,7 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 				realWrite:    realWriteKeys,
 				conservative: conservativeKeys,
 				prunedKeys:   prunedKeys,
+				realKeySet:   realKeySet,
 			})
 			validLock.Unlock()
 
@@ -649,7 +675,7 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 					len(validTx.prunedKeys),
 					validTx.prunedKeys,
 					len(validTx.conservative),
-					len(validTx.realRead)+len(validTx.realWrite))
+					len(validTx.realKeySet))
 			}
 		}
 
@@ -864,6 +890,8 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 	writer.WriteString(fmt.Sprintf("Time of processing TXs on Depurge: %s\n", duration))
 	writer.WriteString(fmt.Sprintf("===================================================\n"))
 	writer.Flush()
+
+	utils.CloseEVMPool()
 }
 
 // TestNezhaVariable test Nezha_variable algorithm for variable read/write sets and finer-grained scheduling
@@ -1093,6 +1121,8 @@ func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 	writer.WriteString(fmt.Sprintf("Time of processing TXs on Nezha_variable: %s\n", duration))
 	writer.WriteString(fmt.Sprintf("===================================================\n"))
 	writer.Flush()
+
+	utils.CloseEVMPool()
 }
 
 // TestReplayingTx test a single transaction's replaying

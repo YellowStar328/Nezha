@@ -474,17 +474,19 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 
 	txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
 
-	// if ctx1, ok := contexts["1"]; ok {
-	// 	if ctx3, ok := contexts["3"]; ok {
-	// 		for key, val := range ctx3.PreReadSet {
-	// 			ctx1.PreReadSet[key] = val
-	// 		}
-	// 		for key, val := range ctx3.PreWriteSet {
-	// 			ctx1.PreWriteSet[key] = val
-	// 		}
-	// 	}
-	// }
+	if ctx1, ok := contexts["1"]; ok {
+		if ctx3, ok := contexts["3"]; ok {
+			// ctx1.PreReadSet = make(map[string][]byte) // 或你实际使用的类型
+			// ctx1.PreWriteSet = make(map[string][]byte)
 
+			for key, val := range ctx3.PreReadSet {
+				ctx1.PreReadSet[key] = val
+			}
+			for key, val := range ctx3.PreWriteSet {
+				ctx1.PreWriteSet[key] = val
+			}
+		}
+	}
 	utils.InitEVMPool(dbFile, runtime.NumCPU())
 
 	start := time.Now()
@@ -528,8 +530,7 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 			continue
 		}
 
-		fmt.Printf("\nLevel %d: %d transactions ready - %v\n", levelIndex, len(currentLevel), currentLevel)
-
+		fmt.Printf("\nLevel %d:  \n", levelIndex)
 		levelState := utils.CloneWriteSet(committedState)
 
 		var validTransactions []validatedTransaction
@@ -542,18 +543,22 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 
 			ctx, exists := contexts[txID]
 			if !exists {
+				fmt.Printf("  TX %s: aborted (context not found)\n", txID)
 				abortLock.Lock()
 				validationAborted++
 				abortLock.Unlock()
+				scheduler.Abort(txID)
 				validateWg.Done()
 				return
 			}
 
 			realReadKeys, realWriteKeys, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, levelState)
 			if err != nil {
+				fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
 				abortLock.Lock()
 				validationAborted++
 				abortLock.Unlock()
+				scheduler.Abort(txID)
 				validateWg.Done()
 				return
 			}
@@ -581,9 +586,11 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 			}
 
 			if abort {
+				fmt.Printf("  TX %s: aborted (real keys exceed conservative keys)\n", txID)
 				abortLock.Lock()
 				validationAborted++
 				abortLock.Unlock()
+				scheduler.Abort(txID)
 				validateWg.Done()
 				return
 			}
@@ -625,6 +632,16 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 		validateWg.Wait()
 		validatePool.Release()
 
+		if len(validTransactions) > 0 {
+			validTxIDs := make([]string, 0, len(validTransactions))
+			for _, vt := range validTransactions {
+				validTxIDs = append(validTxIDs, vt.txID)
+			}
+			fmt.Printf("\n %d transactions committed - %v\n", len(validTxIDs), validTxIDs)
+		} else {
+			fmt.Printf("\n 0 transactions committed\n")
+		}
+
 		for _, validTx := range validTransactions {
 			if len(validTx.prunedKeys) > 0 {
 				fmt.Printf("  TX %s: pruned %d keys (%v) - conservative:%d, real:%d\n",
@@ -657,18 +674,22 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 
 				ctx, exists := contexts[txID]
 				if !exists {
+					fmt.Printf("  TX %s: aborted (context not found)\n", txID)
 					pruneAbortLock.Lock()
 					validationAborted++
 					pruneAbortLock.Unlock()
+					scheduler.Abort(txID)
 					pruneValidateWg.Done()
 					return
 				}
 
 				realReadKeys, realWriteKeys, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, levelState)
 				if err != nil {
+					fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
 					pruneAbortLock.Lock()
 					validationAborted++
 					pruneAbortLock.Unlock()
+					scheduler.Abort(txID)
 					pruneValidateWg.Done()
 					return
 				}
@@ -696,9 +717,11 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 				}
 
 				if abort {
+					fmt.Printf("  TX %s: aborted (real keys exceed conservative keys)\n", txID)
 					pruneAbortLock.Lock()
 					validationAborted++
 					pruneAbortLock.Unlock()
+					scheduler.Abort(txID)
 					pruneValidateWg.Done()
 					return
 				}

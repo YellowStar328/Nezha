@@ -194,6 +194,46 @@ func (ds *DepurgeScheduler) Execute(txID string) {
 	}
 }
 
+func (ds *DepurgeScheduler) Abort(txID string) {
+	if ds.txExecuted[txID] {
+		return
+	}
+
+	ds.txExecuted[txID] = true
+
+	keys := ds.txKeyMap[txID]
+	for _, key := range keys {
+		queue := ds.keyQueues[key]
+		if queue.front() == txID {
+			queue.pop()
+
+			nextTx := queue.front()
+			if nextTx != "" && !ds.txExecuted[nextTx] {
+				ds.txReadyCount[nextTx]--
+				if ds.txReadyCount[nextTx] == 0 {
+					isAlreadyInReady := false
+					for elem := ds.readyQueue.Front(); elem != nil; elem = elem.Next() {
+						if elem.Value.(string) == nextTx {
+							isAlreadyInReady = true
+							break
+						}
+					}
+					isAlreadyInPruneReady := false
+					for elem := ds.pruneReadyQueue.Front(); elem != nil; elem = elem.Next() {
+						if elem.Value.(string) == nextTx {
+							isAlreadyInPruneReady = true
+							break
+						}
+					}
+					if !isAlreadyInReady && !isAlreadyInPruneReady {
+						ds.pruneReadyQueue.PushBack(nextTx)
+					}
+				}
+			}
+		}
+	}
+}
+
 func (ds *DepurgeScheduler) Prune(txID string, realKeys []string) {
 	conservativeKeys := ds.txKeyMap[txID]
 	conservativeKeySet := make(map[string]bool)

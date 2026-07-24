@@ -2,7 +2,6 @@ package utils
 
 import (
 	"Nezha/core"
-	"Nezha/ethereum/go-ethereum/common"
 	"Nezha/evm/levm"
 	"encoding/json"
 	"fmt"
@@ -17,7 +16,6 @@ import (
 	"Nezha/evm/levm/tools"
 
 	"github.com/panjf2000/ants"
-	"golang.org/x/crypto/sha3"
 )
 
 type LLMRequest struct {
@@ -62,104 +60,49 @@ func ClearLLMCache() {
 	llmCache = sync.Map{}
 }
 
-func getStorageKey(accountID uint64, field string) []byte {
-	var mappingSlot uint64
-	switch field {
-	case "saving":
-		mappingSlot = 0
-	case "checking":
-		mappingSlot = 1
-	default:
-		mappingSlot = 1
-	}
-
-	// Solidity mapping key类型是string，key encoding = 原始字节，不做任何哈希/补齐
-	key := strconv.FormatUint(accountID, 10)
-	keyBytes := []byte(key)
-
-	slotBytes := common.LeftPadBytes(
-		big.NewInt(int64(mappingSlot)).Bytes(),
-		32,
-	)
-
-	// keccak256(key_bytes . pad32(slot))  —— 只有这一次哈希
-	data := append(keyBytes, slotBytes...)
-
-	h := sha3.NewLegacyKeccak256()
-	h.Write(data)
-	return h.Sum(nil)
-}
-
 var ErrNotPreAnalyzed = fmt.Errorf("function not pre-analyzed")
 
-func buildLLMPrompt(function string) string {
-	contractCode := `pragma solidity >=0.4.0 <0.7.0;
-contract SmallBank {
-    mapping(string => uint256) savingStore;  // slot 0
-    mapping(string => uint256) checkingStore; // slot 1
+func buildLLMPrompt(contractName, functionName string) string {
+	cm := GetContractManager()
+	if cm == nil {
+		return ""
+	}
 
-    function almagate(string memory arg0, string memory arg1) public {
-        uint256 bal1 = savingStore[arg0];
-        uint256 bal2 = checkingStore[arg1];
-        checkingStore[arg0] = 0;
-        savingStore[arg1] = bal1 + bal2;
-    }
+	sourceCode, err := cm.GetSourceCode(contractName)
+	if err != nil {
+		fmt.Printf("Warning: failed to get source code for %s: %v\n", contractName, err)
+		return ""
+	}
 
-    function getBalance(string memory arg0) public view returns (uint256 balance) {
-        uint256 bal1 = savingStore[arg0];
-        uint256 bal2 = checkingStore[arg0];
-        balance = bal1 + bal2;
-        return balance;
-    }
+	funcDef, ok := cm.GetFunction(contractName, functionName)
+	if !ok {
+		fmt.Printf("Warning: function %s not found in contract %s\n", functionName, contractName)
+		return ""
+	}
 
-    function updateBalance(string memory arg0, uint256 arg1) public {
-        uint256 bal1 = checkingStore[arg0];
-        checkingStore[arg0] = bal1 + arg1;
-    }
+	argMappingStr := fmt.Sprintf("- %s:", functionName)
+	first := true
+	for arg, addr := range funcDef.ArgMapping {
+		if !first {
+			argMappingStr += ", "
+		}
+		argMappingStr += fmt.Sprintf(" %s=%s", arg, addr)
+		first = false
+	}
 
-    function updateSaving(string memory arg0, uint256 arg1) public {
-        uint256 bal1 = savingStore[arg0];
-        savingStore[arg0] = bal1 + arg1;
-    }
+	contractConfig, _ := cm.GetContractConfig(contractName)
+	fieldOptions := ""
+	for _, mapping := range contractConfig.StorageLayout {
+		fieldOptions += fmt.Sprintf("- \"%s\" - 对应 %s\n", strings.TrimSuffix(mapping.MappingName, "Store"), mapping.MappingName)
+	}
 
-    function sendPayment(string memory arg0, string memory arg1, uint256 arg2) public {
-        uint256 bal1 = checkingStore[arg0];
-        uint256 bal2 = checkingStore[arg1];
-        uint256 amount = arg2;
-        if (!(bal2 == 0 || bal2 == 25 || bal2 == 100)) {
-            bal1 -= amount;
-            amount = 0;
-        }
-        bal1 -= amount;
-        bal2 += amount;
-        checkingStore[arg0] = bal1;
-        checkingStore[arg1] = bal2;
-    }
-
-    function writeCheck(string memory arg0, uint256 arg1) public {
-        uint256 bal1 = checkingStore[arg0];
-        uint256 bal2 = savingStore[arg0];
-        uint256 amount = arg1;
-        if (amount < bal1 + bal2) {
-            checkingStore[arg0] = bal1 + amount - 1;
-        } else {
-            checkingStore[arg0] = bal1 + amount;
-        }
-    }
-}`
-
-	prompt := fmt.Sprintf(`你是一个智能合约分析专家。请分析以下 SmallBank 合约中函数 "%s" 的保守读写集。
+	prompt := fmt.Sprintf(`你是一个智能合约分析专家。请分析以下 %s 合约中函数 "%s" 的保守读写集。
 
 合约代码：
 %s
 
 参数映射规则：
-- almagate: arg0=addr1, arg1=addr2
-- getBalance: arg0=addr1
-- updateBalance: arg0=addr1
-- updateSaving: arg0=addr1
-- sendPayment: arg0=addr1, arg1=addr2
-- writeCheck: arg0=addr1
+%s
 
 请返回保守的读写集（包含所有可能访问的存储位置，即使在某些条件下可能不被访问）。
 
@@ -175,14 +118,13 @@ contract SmallBank {
 }
 
 字段选项：
-- "checking" - 对应 checkingStore
-- "saving" - 对应 savingStore
+%s
 
 注意：
 1. account 只能是 "addr1" 或 "addr2"
 2. 保守分析意味着包含所有可能被访问的存储位置
 3. 不要遗漏任何可能的分支路径
-4. 只返回JSON，不要包含其他文字`, function, contractCode)
+4. 只返回JSON，不要包含其他文字`, contractName, functionName, sourceCode, argMappingStr, fieldOptions)
 
 	return prompt
 }
@@ -286,23 +228,30 @@ func callLLM(prompt string) (*LLMResponse, error) {
 	return &llmResp, nil
 }
 
-func PreAnalyzeContract(functions []string) error {
-	for _, function := range functions {
-		if _, ok := llmCache.Load(function); ok {
-			fmt.Printf("Function %s already analyzed, skipping\n", function)
+func PreAnalyzeContract(pairs []ContractFunctionPair) error {
+	for _, pair := range pairs {
+		cacheKey := fmt.Sprintf("%s:%s", pair.ContractName, pair.FunctionName)
+
+		if _, ok := llmCache.Load(cacheKey); ok {
+			fmt.Printf("Function %s:%s already analyzed, skipping\n", pair.ContractName, pair.FunctionName)
 			continue
 		}
 
-		fmt.Printf("Pre-analyzing function: %s\n", function)
-		prompt := buildLLMPrompt(function)
+		fmt.Printf("Pre-analyzing function: %s:%s\n", pair.ContractName, pair.FunctionName)
+		prompt := buildLLMPrompt(pair.ContractName, pair.FunctionName)
+		if prompt == "" {
+			fmt.Printf("Warning: failed to build prompt for %s:%s\n", pair.ContractName, pair.FunctionName)
+			continue
+		}
+
 		resp, err := callLLM(prompt)
 		if err != nil {
-			fmt.Printf("Pre-analysis failed for %s: %v\n", function, err)
+			fmt.Printf("Pre-analysis failed for %s:%s: %v\n", pair.ContractName, pair.FunctionName, err)
 			return err
 		}
 
-		llmCache.Store(function, resp)
-		fmt.Printf("Pre-analysis completed for %s: reads=%d, writes=%d\n", function, len(resp.Reads), len(resp.Writes))
+		llmCache.Store(cacheKey, resp)
+		fmt.Printf("Pre-analysis completed for %s:%s: reads=%d, writes=%d\n", pair.ContractName, pair.FunctionName, len(resp.Reads), len(resp.Writes))
 	}
 
 	fmt.Println("Pre-analysis of all functions completed")
@@ -310,7 +259,7 @@ func PreAnalyzeContract(functions []string) error {
 }
 
 func analyzeTransactionLLM(tx Transaction) (*LLMResponse, error) {
-	cacheKey := tx.Function
+	cacheKey := fmt.Sprintf("%s:%s", tx.ContractName, tx.Function)
 
 	if cached, ok := llmCache.Load(cacheKey); ok {
 		return cached.(*LLMResponse), nil
@@ -319,8 +268,13 @@ func analyzeTransactionLLM(tx Transaction) (*LLMResponse, error) {
 	return nil, ErrNotPreAnalyzed
 }
 
-func llmResponseToRWSet(resp *LLMResponse, addr1, addr2 uint64) ([][]byte, [][]byte, [][]byte, [][]byte) {
+func llmResponseToRWSet(contractName string, resp *LLMResponse, addr1, addr2 uint64) ([][]byte, [][]byte, [][]byte, [][]byte) {
 	var rAddr, rValue, wAddr, wValue [][]byte
+
+	cm := GetContractManager()
+	if cm == nil {
+		return rAddr, rValue, wAddr, wValue
+	}
 
 	for _, access := range resp.Reads {
 		var accountID uint64
@@ -329,7 +283,14 @@ func llmResponseToRWSet(resp *LLMResponse, addr1, addr2 uint64) ([][]byte, [][]b
 		} else {
 			accountID = addr2
 		}
-		key := getStorageKey(accountID, access.Field)
+
+		mappingName := access.Field + "Store"
+		key, err := cm.GetStorageKey(contractName, mappingName, accountID)
+		if err != nil {
+			fmt.Printf("Warning: failed to get storage key for %s:%s: %v\n", contractName, mappingName, err)
+			continue
+		}
+
 		rAddr = append(rAddr, key)
 		rValue = append(rValue, big.NewInt(0).Bytes())
 	}
@@ -341,7 +302,14 @@ func llmResponseToRWSet(resp *LLMResponse, addr1, addr2 uint64) ([][]byte, [][]b
 		} else {
 			accountID = addr2
 		}
-		key := getStorageKey(accountID, access.Field)
+
+		mappingName := access.Field + "Store"
+		key, err := cm.GetStorageKey(contractName, mappingName, accountID)
+		if err != nil {
+			fmt.Printf("Warning: failed to get storage key for %s:%s: %v\n", contractName, mappingName, err)
+			continue
+		}
+
 		wAddr = append(wAddr, key)
 		wValue = append(wValue, big.NewInt(0).Bytes())
 	}
@@ -375,8 +343,21 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 			lvm.NewAccount(fromAddr, big.NewInt(1e18))
 			defer lvm.Close()
 
-			abiObject, binData, loadErr := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-				"./SmallBank/small_bank_sol_SmallBank.bin")
+			cm := GetContractManager()
+			if cm == nil {
+				fmt.Println("ContractManager not initialized")
+				wg.Done()
+				return
+			}
+
+			contractConfig, ok := cm.GetContractConfig(tx.ContractName)
+			if !ok {
+				fmt.Printf("Contract %s not found\n", tx.ContractName)
+				wg.Done()
+				return
+			}
+
+			abiObject, binData, loadErr := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
 			if loadErr != nil {
 				fmt.Println(loadErr)
 				wg.Done()
@@ -390,7 +371,7 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 				return
 			}
 
-			rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, tx.Function, tx.Addr1, tx.Addr2)
+			rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, tx.ContractName, tx.Function, tx.Addr1, tx.Addr2)
 
 			var rAddr, rValue, wAddr, wValue [][]byte
 			for key := range rMap {
@@ -409,6 +390,7 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 			if shouldCapture {
 				ctx := core.RWNodesToContext(
 					strconv.FormatInt(int64(n), 10),
+					tx.ContractName,
 					tx.Function,
 					tx.Addr1,
 					tx.Addr2,
@@ -423,7 +405,7 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 			return
 		}
 
-		rAddr, rValue, wAddr, wValue := llmResponseToRWSet(llmResp, tx.Addr1, tx.Addr2)
+		rAddr, rValue, wAddr, wValue := llmResponseToRWSet(tx.ContractName, llmResp, tx.Addr1, tx.Addr2)
 
 		rwNodes := core.CreateRWNode(strconv.FormatInt(int64(n), 10), uint32(n), rAddr, rValue, wAddr, wValue)
 
@@ -432,13 +414,14 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 
 		if shouldCapture {
 			ctx := &core.TransactionContext{
-				TxID:        strconv.FormatInt(int64(n), 10),
-				Function:    tx.Function,
-				Addr1:       tx.Addr1,
-				Addr2:       tx.Addr2,
-				PreReadSet:  make(map[string][]byte),
-				PreWriteSet: make(map[string][]byte),
-				FromAddr:    tools.NewRandomAddress(),
+				TxID:         strconv.FormatInt(int64(n), 10),
+				ContractName: tx.ContractName,
+				Function:     tx.Function,
+				Addr1:        tx.Addr1,
+				Addr2:        tx.Addr2,
+				PreReadSet:   make(map[string][]byte),
+				PreWriteSet:  make(map[string][]byte),
+				FromAddr:     tools.NewRandomAddress(),
 			}
 
 			for i := range rAddr {

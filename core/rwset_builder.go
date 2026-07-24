@@ -65,6 +65,7 @@ func ConvertByte2String(bytes []byte) string {
 // 注意：不直接引用 utils.Transaction，避免循环依赖
 type TransactionContext struct {
 	TxID          string
+	ContractName  string              // 合约名称
 	Function      string              // 交易函数名
 	Addr1         uint64              // 交易参数
 	Addr2         uint64              // 交易参数
@@ -78,6 +79,7 @@ type TransactionContext struct {
 // RWNodesToContext 辅助函数：将 []*RWNode 转换为 TransactionContext
 func RWNodesToContext(
 	txID string,
+	contractName string,
 	function string,
 	addr1 uint64,
 	addr2 uint64,
@@ -122,6 +124,7 @@ func RWNodesToContext(
 
 	return &TransactionContext{
 		TxID:          txID,
+		ContractName:  contractName,
 		Function:      function,
 		Addr1:         addr1,
 		Addr2:         addr2,

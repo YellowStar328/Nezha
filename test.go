@@ -66,6 +66,11 @@ func main() {
 	flag.BoolVar(&benchmark, "benchmark", false, "specify benchmark mode to use. defaults to false.")
 	flag.Parse()
 
+	err := utils.InitContractManager("./config/contracts.yaml")
+	if err != nil {
+		log.Fatalf("Failed to init contract manager: %v", err)
+	}
+
 	// 清理旧的数据库，确保每次测试从零开始
 	CleanupDatabases()
 
@@ -100,26 +105,38 @@ func main() {
 		for addr4 == addr3 || addr4 == addr1 || addr4 == addr2 {
 			addr4 = z.Uint64()
 		}
+
+		cm := utils.GetContractManager()
+		contractNames := cm.GetAllContractNames()
+		defaultContract := "SmallBank"
+		if len(contractNames) > 0 {
+			defaultContract = contractNames[0]
+		}
+
 		txList = []utils.Transaction{
 			{
-				Function: "updateBalance",
-				Addr1:    addr1,
-				Addr2:    addr2,
+				ContractName: defaultContract,
+				Function:     "updateBalance",
+				Addr1:        addr1,
+				Addr2:        addr2,
 			},
 			{
-				Function: "sendPayment",
-				Addr1:    addr3,
-				Addr2:    addr4,
+				ContractName: defaultContract,
+				Function:     "sendPayment",
+				Addr1:        addr3,
+				Addr2:        addr4,
 			},
 			{
-				Function: "sendPayment",
-				Addr1:    addr1,
-				Addr2:    addr2,
+				ContractName: defaultContract,
+				Function:     "sendPayment",
+				Addr1:        addr1,
+				Addr2:        addr2,
 			},
 			{
-				Function: "sendPayment",
-				Addr1:    addr1,
-				Addr2:    addr2,
+				ContractName: defaultContract,
+				Function:     "sendPayment",
+				Addr1:        addr1,
+				Addr2:        addr2,
 			},
 		}
 	} else {
@@ -230,7 +247,7 @@ func TestSimulation(txList []utils.Transaction, writer *bufio.Writer) {
 		addr := cAddress[n]
 		tx := txList[n]
 
-		utils.SelectFunctions(lvm, fromAddr, addr, abiObject, tx.Function, tx.Addr1, tx.Addr2)
+		utils.SelectFunctions(lvm, fromAddr, addr, abiObject, tx.ContractName, tx.Function, tx.Addr1, tx.Addr2)
 
 		wg.Done()
 	})
@@ -407,7 +424,7 @@ func TestSerialExecution(txList []utils.Transaction, writer *bufio.Writer) {
 
 	// 使用预生成的交易序列
 	for _, tx := range txList {
-		utils.SelectFunctions(lvm, fromAddr, addr, abiObject, tx.Function, tx.Addr1, tx.Addr2)
+		utils.SelectFunctions(lvm, fromAddr, addr, abiObject, tx.ContractName, tx.Function, tx.Addr1, tx.Addr2)
 	}
 
 	stateDB := lvm.GetStateDB()
@@ -493,24 +510,27 @@ func TestAppConcurrency(txNum int, blksize int, con int, addrNum uint64, skew fl
 // TestDepurge test
 func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
 
-	utils.PreAnalyzeContract([]string{"writeCheck", "almagate", "getBalance", "updateBalance", "updateSaving", "sendPayment"})
+	cm := utils.GetContractManager()
+	allFuncPairs := cm.GetAllFunctionsForPreAnalysis()
+	utils.PreAnalyzeContract(allFuncPairs)
 
 	// txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
 	txs, contexts := utils.LLMCaptureRWSet(txList, dbFile, true)
 
-	// if ctx1, ok := contexts["1"]; ok {
-	// 	if ctx3, ok := contexts["3"]; ok {
-	// 		// ctx1.PreReadSet = make(map[string][]byte) // 或你实际使用的类型
-	// 		// ctx1.PreWriteSet = make(map[string][]byte)
+	//测试保守读写集
+	if ctx1, ok := contexts["1"]; ok {
+		if ctx3, ok := contexts["3"]; ok {
+			// ctx1.PreReadSet = make(map[string][]byte) // 或你实际使用的类型
+			// ctx1.PreWriteSet = make(map[string][]byte)
 
-	// 		for key, val := range ctx3.PreReadSet {
-	// 			ctx1.PreReadSet[key] = val
-	// 		}
-	// 		for key, val := range ctx3.PreWriteSet {
-	// 			ctx1.PreWriteSet[key] = val
-	// 		}
-	// 	}
-	// }
+			for key, val := range ctx3.PreReadSet {
+				ctx1.PreReadSet[key] = val
+			}
+			for key, val := range ctx3.PreWriteSet {
+				ctx1.PreWriteSet[key] = val
+			}
+		}
+	}
 	utils.InitEVMPool(dbFile, runtime.NumCPU())
 	start := time.Now()
 	start1 := time.Now()

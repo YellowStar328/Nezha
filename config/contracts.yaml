@@ -1,0 +1,53 @@
+global:
+  seed: 12345
+  addr_num: 100
+  zipf_skew: 0.6
+  base_path: "./contracts"
+contracts:
+  - name: SmallBank
+    weight: 1
+    abi_path: "./contracts/SmallBank/small_bank_sol_SmallBank.abi"
+    bin_path: "./contracts/SmallBank/small_bank_sol_SmallBank.bin"
+    source_path: "./contracts/SmallBank/small_bank.sol"
+    storage_layout:
+      - mapping_name: savingStore
+        slot: 0
+        key_type: string
+      - mapping_name: checkingStore
+        slot: 1
+        key_type: string
+    functions:
+      - name: almagate
+        args: 2
+        arg_mapping:
+          arg0: addr1
+          arg1: addr2
+      - name: getBalance
+        args: 1
+        arg_mapping:
+          arg0: addr1
+      - name: updateBalance
+        args: 2
+        arg_mapping:
+          arg0: addr1
+        fixed_args:
+          arg1: 100
+      - name: updateSaving
+        args: 2
+        arg_mapping:
+          arg0: addr1
+        fixed_args:
+          arg1: 100
+      - name: sendPayment
+        args: 3
+        arg_mapping:
+          arg0: addr1
+          arg1: addr2
+        fixed_args:
+          arg2: 25
+      - name: writeCheck
+        args: 2
+        arg_mapping:
+          arg0: addr1
+        fixed_args:
+          arg1: 20

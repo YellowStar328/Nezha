@@ -89,9 +89,10 @@ func InitEVMPool(dbFile string, poolSize int) {
 
 // Transaction 表示一个预生成的交易
 type Transaction struct {
-	Function string // 函数名
-	Addr1    uint64 // 地址1
-	Addr2    uint64 // 地址2
+	ContractName string // 合约名称
+	Function     string // 函数名
+	Addr1        uint64 // 地址1
+	Addr2        uint64 // 地址2
 }
 
 type debugEvent struct {
@@ -149,35 +150,37 @@ func ReportDebugEvent(hypothesisID, location, msg string, data map[string]interf
 func GenerateTransactions(addrNum uint64, txNum int, skew float64, seed int64) []Transaction {
 	var txs []Transaction
 
-	// 使用固定的随机种子确保结果可重复
 	r := rand.New(rand.NewSource(seed))
 	z := zipf.NewZipf(r, skew, addrNum)
 
-	selectFunc := []string{"almagate", "updateBalance", "updateSaving", "sendPayment", "writeCheck", "getBalance"}
+	cm := GetContractManager()
+	if cm == nil {
+		fmt.Println("ContractManager not initialized")
+		return txs
+	}
 
 	for i := 0; i < txNum; i++ {
-		// 5% 只读交易，95% 写交易（与原 Nezha 一致）
-		random := r.Float32()
-		var function string
-		if random <= 0.05 {
-			function = selectFunc[5] // getBalance
-		} else {
-			random2 := r.Intn(5)
-			function = selectFunc[random2]
+		contractConfig := cm.RandomSelectContract(r)
+		if contractConfig == nil {
+			continue
 		}
 
-		// 生成地址
+		funcDef := cm.RandomSelectFunction(contractConfig.Name, r)
+		if funcDef == nil {
+			continue
+		}
+
 		addr1 := z.Uint64()
 		addr2 := z.Uint64()
-		// 确保 addr2 != addr1
 		for addr2 == addr1 {
 			addr2 = z.Uint64()
 		}
 
 		txs = append(txs, Transaction{
-			Function: function,
-			Addr1:    addr1,
-			Addr2:    addr2,
+			ContractName: contractConfig.Name,
+			Function:     funcDef.Name,
+			Addr1:        addr1,
+			Addr2:        addr2,
 		})
 	}
 
@@ -255,7 +258,7 @@ func CaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][]*c
 			addr2 = z.Uint64()
 		}
 
-		rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, function, addr1, addr2)
+		rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, "SmallBank", function, addr1, addr2)
 
 		// generate r/w set
 		var rAddr [][]byte
@@ -345,7 +348,7 @@ func ConCaptureRWSetWithTransactions(
 			return
 		}
 
-		rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, tx.Function, tx.Addr1, tx.Addr2)
+		rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, tx.ContractName, tx.Function, tx.Addr1, tx.Addr2)
 
 		// generate r/w set
 		var rAddr [][]byte
@@ -376,6 +379,7 @@ func ConCaptureRWSetWithTransactions(
 		if shouldCapture {
 			ctx := core.RWNodesToContext(
 				strconv.FormatInt(int64(n), 10),
+				tx.ContractName,
 				tx.Function,
 				tx.Addr1,
 				tx.Addr2,
@@ -421,105 +425,76 @@ func ConCaptureRWSetWithTransactions(
 	return sortedTxs, contexts
 }
 
-func SelectFunctions(lvm *levm.LEVM, fromAddr common.Address, cAddr common.Address, abiObject abi.ABI, funcName string,
+func SelectFunctions(lvm *levm.LEVM, fromAddr common.Address, cAddr common.Address, abiObject abi.ABI, contractName, funcName string,
 	addr1 uint64, addr2 uint64) {
-	switch funcName {
-	case "almagate":
-		_, err := lvm.CallContractABI(fromAddr, cAddr, big.NewInt(0), abiObject, "almagate",
-			strconv.FormatUint(addr1, 10), strconv.FormatUint(addr2, 10))
-		if err != nil {
-			fmt.Println("get error : ", err)
+	cm := GetContractManager()
+	if cm == nil {
+		fmt.Println("ContractManager not initialized")
+		return
+	}
+
+	funcDef, ok := cm.GetFunction(contractName, funcName)
+	if !ok {
+		fmt.Printf("Function %s:%s not found\n", contractName, funcName)
+		return
+	}
+
+	var args []interface{}
+	for i := 0; i < funcDef.Args; i++ {
+		argName := fmt.Sprintf("arg%d", i)
+
+		if addrMapping, ok := funcDef.ArgMapping[argName]; ok {
+			if addrMapping == "addr1" {
+				args = append(args, strconv.FormatUint(addr1, 10))
+			} else if addrMapping == "addr2" {
+				args = append(args, strconv.FormatUint(addr2, 10))
+			}
+		} else if fixedValue, ok := funcDef.FixedArgs[argName]; ok {
+			args = append(args, big.NewInt(int64(fixedValue)))
 		}
-		//fmt.Println("get output:", getOutput)
-	case "getBalance":
-		_, err := lvm.CallContractABI(fromAddr, cAddr, big.NewInt(0), abiObject, "getBalance",
-			strconv.FormatUint(addr1, 10))
-		if err != nil {
-			fmt.Println("get error : ", err)
-		}
-		//fmt.Println("get output:", getOutput)
-	case "updateBalance":
-		_, err := lvm.CallContractABI(fromAddr, cAddr, big.NewInt(0), abiObject, "updateBalance",
-			strconv.FormatUint(addr2, 10), big.NewInt(100))
-		if err != nil {
-			fmt.Println("get error : ", err)
-		}
-		//fmt.Println("get output:", getOutput)
-	case "updateSaving":
-		_, err := lvm.CallContractABI(fromAddr, cAddr, big.NewInt(0), abiObject, "updateSaving",
-			strconv.FormatUint(addr1, 10), big.NewInt(100))
-		if err != nil {
-			fmt.Println("get error : ", err)
-		}
-		//fmt.Println("get output:", getOutput)
-	case "sendPayment":
-		_, err := lvm.CallContractABI(fromAddr, cAddr, big.NewInt(0), abiObject, "sendPayment",
-			strconv.FormatUint(addr1, 10), strconv.FormatUint(addr2, 10), big.NewInt(50))
-		if err != nil {
-			fmt.Println("get error : ", err)
-		}
-		//fmt.Println("get output:", getOutput)
-	case "writeCheck":
-		_, err := lvm.CallContractABI(fromAddr, cAddr, big.NewInt(0), abiObject, "writeCheck",
-			strconv.FormatUint(addr2, 10), big.NewInt(20))
-		if err != nil {
-			fmt.Println("get error : ", err)
-		}
-		//fmt.Println("get output:", getOutput)
-	default:
-		fmt.Println("Invalid inputs")
+	}
+
+	_, err := lvm.CallContractABI(fromAddr, cAddr, big.NewInt(0), abiObject, funcName, args...)
+	if err != nil {
+		fmt.Println("get error : ", err)
 	}
 }
 
-func SelectFunctions2(lvm *levm.LEVM, fromAddr common.Address, cAddr common.Address, abiObject abi.ABI, funcName string,
+func SelectFunctions2(lvm *levm.LEVM, fromAddr common.Address, cAddr common.Address, abiObject abi.ABI, contractName, funcName string,
 	addr1 uint64, addr2 uint64) (vm.Storage, vm.Storage) {
-	switch funcName {
-	case "almagate":
-		rMap, wMap, _, err := lvm.CallContractABI2(fromAddr, cAddr, big.NewInt(0), abiObject, "almagate",
-			strconv.FormatUint(addr1, 10), strconv.FormatUint(addr2, 10))
-		if err != nil {
-			fmt.Println("get error : ", err)
-		}
-		return rMap, wMap
-	case "getBalance":
-		rMap, wMap, _, err := lvm.CallContractABI2(fromAddr, cAddr, big.NewInt(0), abiObject, "getBalance",
-			strconv.FormatUint(addr1, 10))
-		if err != nil {
-			fmt.Println("get error : ", err)
-		}
-		return rMap, wMap
-	case "updateBalance":
-		rMap, wMap, _, err := lvm.CallContractABI2(fromAddr, cAddr, big.NewInt(0), abiObject, "updateBalance",
-			strconv.FormatUint(addr1, 10), big.NewInt(100))
-		if err != nil {
-			fmt.Println("get error : ", err)
-		}
-		return rMap, wMap
-	case "updateSaving":
-		rMap, wMap, _, err := lvm.CallContractABI2(fromAddr, cAddr, big.NewInt(0), abiObject, "updateSaving",
-			strconv.FormatUint(addr1, 10), big.NewInt(100))
-		if err != nil {
-			fmt.Println("get error : ", err)
-		}
-		return rMap, wMap
-	case "sendPayment":
-		rMap, wMap, _, err := lvm.CallContractABI2(fromAddr, cAddr, big.NewInt(0), abiObject, "sendPayment",
-			strconv.FormatUint(addr1, 10), strconv.FormatUint(addr2, 10), big.NewInt(25))
-		if err != nil {
-			fmt.Println("get error : ", err)
-		}
-		return rMap, wMap
-	case "writeCheck":
-		rMap, wMap, _, err := lvm.CallContractABI2(fromAddr, cAddr, big.NewInt(0), abiObject, "writeCheck",
-			strconv.FormatUint(addr1, 10), big.NewInt(20))
-		if err != nil {
-			fmt.Println("get error : ", err)
-		}
-		return rMap, wMap
-	default:
-		fmt.Println("Invalid inputs")
+	cm := GetContractManager()
+	if cm == nil {
+		fmt.Println("ContractManager not initialized")
 		return nil, nil
 	}
+
+	funcDef, ok := cm.GetFunction(contractName, funcName)
+	if !ok {
+		fmt.Printf("Function %s:%s not found\n", contractName, funcName)
+		return nil, nil
+	}
+
+	var args []interface{}
+	for i := 0; i < funcDef.Args; i++ {
+		argName := fmt.Sprintf("arg%d", i)
+
+		if addrMapping, ok := funcDef.ArgMapping[argName]; ok {
+			if addrMapping == "addr1" {
+				args = append(args, strconv.FormatUint(addr1, 10))
+			} else if addrMapping == "addr2" {
+				args = append(args, strconv.FormatUint(addr2, 10))
+			}
+		} else if fixedValue, ok := funcDef.FixedArgs[argName]; ok {
+			args = append(args, big.NewInt(int64(fixedValue)))
+		}
+	}
+
+	rMap, wMap, _, err := lvm.CallContractABI2(fromAddr, cAddr, big.NewInt(0), abiObject, funcName, args...)
+	if err != nil {
+		fmt.Println("get error : ", err)
+		return nil, nil
+	}
+	return rMap, wMap
 }
 
 func ProcessRWMap(rMap, wMap vm.Storage) (map[string]string, map[string]string) {
@@ -715,7 +690,7 @@ func ReExecuteAndValidateTransactionWithState(
 
 	inst.lvm.NewEVM(big.NewInt(0), ctx.FromAddr)
 
-	newRMap, newWMap := SelectFunctions2(inst.lvm, ctx.FromAddr, inst.contractAddr, abiObject, ctx.Function, ctx.Addr1, ctx.Addr2)
+	newRMap, newWMap := SelectFunctions2(inst.lvm, ctx.FromAddr, inst.contractAddr, abiObject, ctx.ContractName, ctx.Function, ctx.Addr1, ctx.Addr2)
 
 	// 计算增量：写值 - 读值（处理 uint256 下溢）
 	two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
@@ -760,8 +735,17 @@ func ReExecuteAndGetRealRWSet(
 	dbFile string,
 	logicalState map[string][]byte,
 ) ([]string, []string, map[string]*big.Int, error) {
-	abiObject, _, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-		"./SmallBank/small_bank_sol_SmallBank.bin")
+	cm := GetContractManager()
+	if cm == nil {
+		return nil, nil, nil, fmt.Errorf("ContractManager not initialized")
+	}
+
+	contractConfig, ok := cm.GetContractConfig(ctx.ContractName)
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("Contract %s not found", ctx.ContractName)
+	}
+
+	abiObject, _, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -776,7 +760,7 @@ func ReExecuteAndGetRealRWSet(
 
 	inst.lvm.NewEVM(big.NewInt(0), ctx.FromAddr)
 
-	newRMap, newWMap := SelectFunctions2(inst.lvm, ctx.FromAddr, inst.contractAddr, abiObject, ctx.Function, ctx.Addr1, ctx.Addr2)
+	newRMap, newWMap := SelectFunctions2(inst.lvm, ctx.FromAddr, inst.contractAddr, abiObject, ctx.ContractName, ctx.Function, ctx.Addr1, ctx.Addr2)
 
 	realReadKeys := make([]string, 0, len(newRMap))
 	for key := range newRMap {

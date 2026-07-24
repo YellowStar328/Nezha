@@ -97,6 +97,17 @@ func (cm *ContractManager) GetAllContractNames() []string {
 	return names
 }
 
+func (cm *ContractManager) GetAllContracts() []ContractConfig {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	contracts := make([]ContractConfig, 0, len(cm.config.Contracts))
+	for _, contract := range cm.config.Contracts {
+		contracts = append(contracts, contract)
+	}
+	return contracts
+}
+
 func (cm *ContractManager) GetABI(contractName string) (abi.ABI, error) {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()

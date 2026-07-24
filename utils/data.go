@@ -28,8 +28,9 @@ import (
 )
 
 type EVMInstance struct {
-	lvm          *levm.LEVM
-	contractAddr common.Address
+	lvm           *levm.LEVM
+	contractAddrs map[string]common.Address
+	abis          map[string]abi.ABI
 }
 
 var evmPool *sync.Pool
@@ -56,6 +57,11 @@ func InitEVMPool(dbFile string, poolSize int) {
 	evmPoolCounter = 0
 	evmPoolInstances = make([]*EVMInstance, 0, poolSize)
 
+	cm := GetContractManager()
+	if cm == nil {
+		fmt.Println("Warning: ContractManager not initialized, using default SmallBank contract")
+	}
+
 	evmPool = &sync.Pool{
 		New: func() interface{} {
 			counter := atomic.AddInt32(&evmPoolCounter, 1)
@@ -67,13 +73,37 @@ func InitEVMPool(dbFile string, poolSize int) {
 			lvm := levm.New(uniqueDBFile, big.NewInt(0), common.Address{})
 			lvm.NewAccount(common.Address{}, big.NewInt(1e18))
 
-			_, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-				"./SmallBank/small_bank_sol_SmallBank.bin")
-			_, contractAddr, _, _ := lvm.DeployContract(common.Address{}, binData)
+			contractAddrs := make(map[string]common.Address)
+			abis := make(map[string]abi.ABI)
+
+			if cm != nil {
+				for _, contractConfig := range cm.GetAllContracts() {
+					fmt.Printf("    Deploying contract: %s\n", contractConfig.Name)
+					abiObject, binData, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
+					if err != nil {
+						fmt.Printf("      Failed to load contract %s: %v\n", contractConfig.Name, err)
+						continue
+					}
+					_, addr, _, err := lvm.DeployContract(common.Address{}, binData)
+					if err != nil {
+						fmt.Printf("      Failed to deploy contract %s: %v\n", contractConfig.Name, err)
+						continue
+					}
+					contractAddrs[contractConfig.Name] = addr
+					abis[contractConfig.Name] = abiObject
+				}
+			} else {
+				abiObject, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+					"./SmallBank/small_bank_sol_SmallBank.bin")
+				_, addr, _, _ := lvm.DeployContract(common.Address{}, binData)
+				contractAddrs["SmallBank"] = addr
+				abis["SmallBank"] = abiObject
+			}
 
 			inst := &EVMInstance{
-				lvm:          lvm,
-				contractAddr: contractAddr,
+				lvm:           lvm,
+				contractAddrs: contractAddrs,
+				abis:          abis,
 			}
 			evmPoolInstances = append(evmPoolInstances, inst)
 			return inst
@@ -217,13 +247,7 @@ func CaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][]*c
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	z := zipf.NewZipf(r, skew, addrNum)
 
-	selectFunc := []string{"almagate", "updateBalance", "updateSaving", "sendPayment", "writeCheck", "getBalance"}
-
-	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-		"./SmallBank/small_bank_sol_SmallBank.bin")
-	if err != nil {
-		fmt.Println(err)
-	}
+	cm := GetContractManager()
 
 	for i := 0; i < txNum; i++ {
 		fromAddr := tools.NewRandomAddress()
@@ -231,22 +255,58 @@ func CaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][]*c
 		lvm := levm.New(dbFile, big.NewInt(0), fromAddr)
 		lvm.NewAccount(fromAddr, big.NewInt(1e18))
 
-		_, addr, _, err := lvm.DeployContract(fromAddr, binData)
-		if err != nil {
-			fmt.Println(err)
+		var addr common.Address
+		var abiObject abi.ABI
+		var contractName string
+
+		if cm != nil {
+			contractConfig := cm.RandomSelectContract(r)
+			contractName = contractConfig.Name
+			var err error
+			abiObject, err = cm.GetABI(contractName)
+			if err != nil {
+				fmt.Printf("Warning: failed to get ABI for %s: %v\n", contractName, err)
+				continue
+			}
+			_, binData, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
+			if err != nil {
+				fmt.Printf("Warning: failed to load contract %s: %v\n", contractName, err)
+				continue
+			}
+			_, addr, _, err = lvm.DeployContract(fromAddr, binData)
+			if err != nil {
+				fmt.Printf("Warning: failed to deploy contract %s: %v\n", contractName, err)
+				continue
+			}
+		} else {
+			contractName = "SmallBank"
+			var err error
+			abiObject, _, err = tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+				"./SmallBank/small_bank_sol_SmallBank.bin")
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+			_, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+				"./SmallBank/small_bank_sol_SmallBank.bin")
+			_, addr, _, _ = lvm.DeployContract(fromAddr, binData)
 		}
 
 		rand.Seed(time.Now().UnixNano())
-		// random := rand.Intn(5)
-		random := rand.Float32()
 
-		// read-write 50-50
 		var function string
-		if random <= 0.05 {
-			function = selectFunc[5]
+		if cm != nil {
+			funcDef := cm.RandomSelectFunction(contractName, rand.New(rand.NewSource(time.Now().UnixNano())))
+			function = funcDef.Name
 		} else {
-			random2 := rand.Intn(5)
-			function = selectFunc[random2]
+			selectFunc := []string{"almagate", "updateBalance", "updateSaving", "sendPayment", "writeCheck", "getBalance"}
+			random := rand.Float32()
+			if random <= 0.05 {
+				function = selectFunc[5]
+			} else {
+				random2 := rand.Intn(5)
+				function = selectFunc[random2]
+			}
 		}
 
 		addr1 := z.Uint64()
@@ -258,7 +318,7 @@ func CaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][]*c
 			addr2 = z.Uint64()
 		}
 
-		rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, "SmallBank", function, addr1, addr2)
+		rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, contractName, function, addr1, addr2)
 
 		// generate r/w set
 		var rAddr [][]byte
@@ -321,11 +381,7 @@ func ConCaptureRWSetWithTransactions(
 		contexts = make(map[string]*core.TransactionContext)
 	}
 
-	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-		"./SmallBank/small_bank_sol_SmallBank.bin")
-	if err != nil {
-		fmt.Println(err)
-	}
+	cm := GetContractManager()
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
@@ -341,11 +397,47 @@ func ConCaptureRWSetWithTransactions(
 		lvm.NewAccount(fromAddr, big.NewInt(1e18))
 		defer lvm.Close()
 
-		_, addr, _, err := lvm.DeployContract(fromAddr, binData)
-		if err != nil {
-			fmt.Println(err)
-			wg.Done()
-			return
+		var addr common.Address
+		var abiObject abi.ABI
+
+		if cm != nil {
+			contractConfig, ok := cm.GetContractConfig(tx.ContractName)
+			if !ok {
+				fmt.Printf("Warning: contract %s not found\n", tx.ContractName)
+				wg.Done()
+				return
+			}
+			var err error
+			abiObject, err = cm.GetABI(tx.ContractName)
+			if err != nil {
+				fmt.Printf("Warning: failed to get ABI for %s: %v\n", tx.ContractName, err)
+				wg.Done()
+				return
+			}
+			_, binData, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
+			if err != nil {
+				fmt.Printf("Warning: failed to load contract %s: %v\n", tx.ContractName, err)
+				wg.Done()
+				return
+			}
+			_, addr, _, err = lvm.DeployContract(fromAddr, binData)
+			if err != nil {
+				fmt.Printf("Warning: failed to deploy contract %s: %v\n", tx.ContractName, err)
+				wg.Done()
+				return
+			}
+		} else {
+			var err error
+			abiObject, _, err = tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+				"./SmallBank/small_bank_sol_SmallBank.bin")
+			if err != nil {
+				fmt.Println(err)
+				wg.Done()
+				return
+			}
+			_, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+				"./SmallBank/small_bank_sol_SmallBank.bin")
+			_, addr, _, _ = lvm.DeployContract(fromAddr, binData)
 		}
 
 		rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, tx.ContractName, tx.Function, tx.Addr1, tx.Addr2)
@@ -674,23 +766,27 @@ func ReExecuteAndValidateTransactionWithState(
 	dbFile string,
 	logicalState map[string][]byte,
 ) (bool, map[string]*big.Int, error) {
-	abiObject, _, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-		"./SmallBank/small_bank_sol_SmallBank.bin")
-	if err != nil {
-		return false, nil, err
-	}
-
 	inst := evmPool.Get().(*EVMInstance)
 	defer evmPool.Put(inst)
 
-	if err := applyLogicalStateToContract(inst.lvm, inst.contractAddr, logicalState); err != nil {
+	contractAddr, ok := inst.contractAddrs[ctx.ContractName]
+	if !ok {
+		return false, nil, fmt.Errorf("contract %s not found in EVM instance", ctx.ContractName)
+	}
+
+	abiObject, ok := inst.abis[ctx.ContractName]
+	if !ok {
+		return false, nil, fmt.Errorf("ABI for contract %s not found in EVM instance", ctx.ContractName)
+	}
+
+	if err := applyLogicalStateToContract(inst.lvm, contractAddr, logicalState); err != nil {
 		return false, nil, err
 	}
 	inst.lvm.NewAccount(ctx.FromAddr, big.NewInt(1e18))
 
 	inst.lvm.NewEVM(big.NewInt(0), ctx.FromAddr)
 
-	newRMap, newWMap := SelectFunctions2(inst.lvm, ctx.FromAddr, inst.contractAddr, abiObject, ctx.ContractName, ctx.Function, ctx.Addr1, ctx.Addr2)
+	newRMap, newWMap := SelectFunctions2(inst.lvm, ctx.FromAddr, contractAddr, abiObject, ctx.ContractName, ctx.Function, ctx.Addr1, ctx.Addr2)
 
 	// 计算增量：写值 - 读值（处理 uint256 下溢）
 	two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
@@ -735,32 +831,27 @@ func ReExecuteAndGetRealRWSet(
 	dbFile string,
 	logicalState map[string][]byte,
 ) ([]string, []string, map[string]*big.Int, error) {
-	cm := GetContractManager()
-	if cm == nil {
-		return nil, nil, nil, fmt.Errorf("ContractManager not initialized")
-	}
-
-	contractConfig, ok := cm.GetContractConfig(ctx.ContractName)
-	if !ok {
-		return nil, nil, nil, fmt.Errorf("Contract %s not found", ctx.ContractName)
-	}
-
-	abiObject, _, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
 	inst := evmPool.Get().(*EVMInstance)
 	defer evmPool.Put(inst)
 
-	if err := applyLogicalStateToContract(inst.lvm, inst.contractAddr, logicalState); err != nil {
+	contractAddr, ok := inst.contractAddrs[ctx.ContractName]
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("contract %s not found in EVM instance", ctx.ContractName)
+	}
+
+	abiObject, ok := inst.abis[ctx.ContractName]
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("ABI for contract %s not found in EVM instance", ctx.ContractName)
+	}
+
+	if err := applyLogicalStateToContract(inst.lvm, contractAddr, logicalState); err != nil {
 		return nil, nil, nil, err
 	}
 	inst.lvm.NewAccount(ctx.FromAddr, big.NewInt(1e18))
 
 	inst.lvm.NewEVM(big.NewInt(0), ctx.FromAddr)
 
-	newRMap, newWMap := SelectFunctions2(inst.lvm, ctx.FromAddr, inst.contractAddr, abiObject, ctx.ContractName, ctx.Function, ctx.Addr1, ctx.Addr2)
+	newRMap, newWMap := SelectFunctions2(inst.lvm, ctx.FromAddr, contractAddr, abiObject, ctx.ContractName, ctx.Function, ctx.Addr1, ctx.Addr2)
 
 	realReadKeys := make([]string, 0, len(newRMap))
 	for key := range newRMap {

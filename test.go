@@ -2,6 +2,7 @@ package main
 
 import (
 	"Nezha/core"
+	"Nezha/ethereum/go-ethereum/accounts/abi"
 	"Nezha/ethereum/go-ethereum/common"
 	ecore "Nezha/ethereum/go-ethereum/core"
 	"Nezha/evm/levm"
@@ -207,33 +208,55 @@ func CleanupDatabases() {
 
 // TestSimulation test concurrent transaction simulations
 func TestSimulation(txList []utils.Transaction, writer *bufio.Writer) {
-	var evmPools []*levm.LEVM
-	var fromAddress []common.Address
-	var cAddress []common.Address
-
 	txNum := len(txList)
 
-	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-		"./SmallBank/small_bank_sol_SmallBank.bin")
-	if err != nil {
-		fmt.Println(err)
+	cm := utils.GetContractManager()
+
+	type evmInstanceInfo struct {
+		lvm           *levm.LEVM
+		fromAddr      common.Address
+		contractAddrs map[string]common.Address
+		abis          map[string]abi.ABI
 	}
+	var evmInstances []evmInstanceInfo
 
 	for i := 0; i < txNum; i++ {
 		fromAddr := tools.NewRandomAddress()
-		fromAddress = append(fromAddress, fromAddr)
-		// create EVM instances
 		lvm := levm.New(dbFile4, big.NewInt(0), fromAddr)
 		lvm.NewAccount(fromAddr, big.NewInt(1e18))
 
-		evmPools = append(evmPools, lvm)
+		contractAddrs := make(map[string]common.Address)
+		abis := make(map[string]abi.ABI)
 
-		_, addr, _, err := lvm.DeployContract(fromAddr, binData)
-		if err != nil {
-			fmt.Println(err)
+		if cm != nil {
+			for _, contractConfig := range cm.GetAllContracts() {
+				abiObject, binData, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
+				if err != nil {
+					fmt.Printf("Warning: failed to load contract %s: %v\n", contractConfig.Name, err)
+					continue
+				}
+				_, addr, _, err := lvm.DeployContract(fromAddr, binData)
+				if err != nil {
+					fmt.Printf("Warning: failed to deploy contract %s: %v\n", contractConfig.Name, err)
+					continue
+				}
+				contractAddrs[contractConfig.Name] = addr
+				abis[contractConfig.Name] = abiObject
+			}
+		} else {
+			abiObject, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+				"./SmallBank/small_bank_sol_SmallBank.bin")
+			_, addr, _, _ := lvm.DeployContract(fromAddr, binData)
+			contractAddrs["SmallBank"] = addr
+			abis["SmallBank"] = abiObject
 		}
 
-		cAddress = append(cAddress, addr)
+		evmInstances = append(evmInstances, evmInstanceInfo{
+			lvm:           lvm,
+			fromAddr:      fromAddr,
+			contractAddrs: contractAddrs,
+			abis:          abis,
+		})
 	}
 
 	//fmt.Println(runtime.NumCPU())
@@ -242,12 +265,24 @@ func TestSimulation(txList []utils.Transaction, writer *bufio.Writer) {
 	var wg sync.WaitGroup
 	p, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
 		n := i.(int)
-		lvm := evmPools[n]
-		fromAddr := fromAddress[n]
-		addr := cAddress[n]
+		inst := evmInstances[n]
 		tx := txList[n]
 
-		utils.SelectFunctions(lvm, fromAddr, addr, abiObject, tx.ContractName, tx.Function, tx.Addr1, tx.Addr2)
+		contractAddr, ok := inst.contractAddrs[tx.ContractName]
+		if !ok {
+			fmt.Printf("Warning: contract %s not found for tx %d\n", tx.ContractName, n)
+			wg.Done()
+			return
+		}
+
+		abiObject, ok := inst.abis[tx.ContractName]
+		if !ok {
+			fmt.Printf("Warning: ABI for contract %s not found for tx %d\n", tx.ContractName, n)
+			wg.Done()
+			return
+		}
+
+		utils.SelectFunctions(inst.lvm, inst.fromAddr, contractAddr, abiObject, tx.ContractName, tx.Function, tx.Addr1, tx.Addr2)
 
 		wg.Done()
 	})
@@ -405,26 +440,54 @@ func TestConflictQueue(txList []utils.Transaction, writer *bufio.Writer, dbFile 
 // TestSerialExecution test serial transaction processing
 func TestSerialExecution(txList []utils.Transaction, writer *bufio.Writer) {
 	fromAddr := tools.NewRandomAddress()
-	abiObject, binData, err := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-		"./SmallBank/small_bank_sol_SmallBank.bin")
-	if err != nil {
-		fmt.Println(err)
-	}
 	lvm := levm.New(dbFile3, big.NewInt(0), fromAddr)
 
 	lvm.NewAccount(fromAddr, big.NewInt(1e18))
 
-	// deploy a contract
-	_, addr, _, err := lvm.DeployContract(fromAddr, binData)
-	if err != nil {
-		fmt.Println(err)
+	cm := utils.GetContractManager()
+	contractAddrs := make(map[string]common.Address)
+	abis := make(map[string]abi.ABI)
+
+	if cm != nil {
+		for _, contractConfig := range cm.GetAllContracts() {
+			abiObject, binData, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
+			if err != nil {
+				fmt.Printf("Warning: failed to load contract %s: %v\n", contractConfig.Name, err)
+				continue
+			}
+			_, addr, _, err := lvm.DeployContract(fromAddr, binData)
+			if err != nil {
+				fmt.Printf("Warning: failed to deploy contract %s: %v\n", contractConfig.Name, err)
+				continue
+			}
+			contractAddrs[contractConfig.Name] = addr
+			abis[contractConfig.Name] = abiObject
+		}
+	} else {
+		abiObject, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+			"./SmallBank/small_bank_sol_SmallBank.bin")
+		_, addr, _, _ := lvm.DeployContract(fromAddr, binData)
+		contractAddrs["SmallBank"] = addr
+		abis["SmallBank"] = abiObject
 	}
 
 	start := time.Now()
 
 	// 使用预生成的交易序列
 	for _, tx := range txList {
-		utils.SelectFunctions(lvm, fromAddr, addr, abiObject, tx.ContractName, tx.Function, tx.Addr1, tx.Addr2)
+		contractAddr, ok := contractAddrs[tx.ContractName]
+		if !ok {
+			fmt.Printf("Warning: contract %s not found\n", tx.ContractName)
+			continue
+		}
+
+		abiObject, ok := abis[tx.ContractName]
+		if !ok {
+			fmt.Printf("Warning: ABI for contract %s not found\n", tx.ContractName)
+			continue
+		}
+
+		utils.SelectFunctions(lvm, fromAddr, contractAddr, abiObject, tx.ContractName, tx.Function, tx.Addr1, tx.Addr2)
 	}
 
 	stateDB := lvm.GetStateDB()

@@ -1,0 +1,22 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "checking"
+    },
+    {
+      "account": "addr2",
+      "field": "checking"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "checking"
+    },
+    {
+      "account": "addr2",
+      "field": "checking"
+    }
+  ]
+}

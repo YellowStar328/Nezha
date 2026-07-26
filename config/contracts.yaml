@@ -2,10 +2,9 @@ global:
   seed: 12345
   addr_num: 100
   zipf_skew: 0.6
-  base_path: "./contracts"
 contracts:
   - name: SmallBank
-    weight: 1
+    weight: 0
     abi_path: "./contracts/SmallBank/small_bank_sol_SmallBank.abi"
     bin_path: "./contracts/SmallBank/small_bank_sol_SmallBank.bin"
     source_path: "./contracts/SmallBank/small_bank.sol"
@@ -51,3 +50,36 @@ contracts:
           arg0: addr1
         fixed_args:
           arg1: 20
+  - name: USDT
+    weight: 1
+    abi_path: "./contracts/USDT/USDT.abi"
+    bin_path: "./contracts/USDT/USDT.bin"
+    source_path: "./contracts/USDT/usdt.sol"
+    storage_layout:
+      - mapping_name: balancesStore
+        slot: 0
+        key_type: string
+      - mapping_name: isBlackListedStore
+        slot: 1
+        key_type: string
+      - mapping_name: feeRate
+        slot: 2
+        key_type: simple
+    functions:
+      - name: setAccount
+        args: 2
+        arg_mapping:
+          arg0: addr1
+        fixed_args:
+          arg1: 100000
+      - name: addBlackList
+        args: 1
+        arg_mapping:
+          arg0: addr1
+      - name: transfer
+        args: 3
+        arg_mapping:
+          arg0: addr1
+          arg1: addr2
+        fixed_args:
+          arg2: 100

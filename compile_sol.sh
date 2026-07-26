@@ -1,24 +1,65 @@
 #!/bin/bash
-# 编译 SmallBank 合约的脚本
+# 通用合约编译脚本
+# 使用方式: ./compile_sol.sh <合约源文件路径>
 
 set -e
 
-# 获取脚本所在目录
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONTRACT_DIR="$SCRIPT_DIR/SmallBank"
 SOLC_VERSION="0.6.12"
 
-echo "正在编译 SmallBank 合约..."
-echo "合约目录: $CONTRACT_DIR"
+print_usage() {
+    echo "用法: $0 <合约源文件路径>"
+    echo "示例:"
+    echo "  $0 ./contracts/SmallBank/small_bank.sol"
+    echo "  $0 /path/to/your/contract.sol"
+}
 
-cd "$CONTRACT_DIR"
-docker run --rm -v $(pwd):/sources ethereum/solc:$SOLC_VERSION --optimize --abi --bin /sources/small_bank.sol -o /sources --overwrite
+if [[ $# -ne 1 ]]; then
+    print_usage
+    exit 1
+fi
 
-# 重命名生成的文件，确保文件名符合 Go 代码的引用
-mv -f SmallBank.abi small_bank_sol_SmallBank.abi 2>/dev/null || true
-mv -f SmallBank.bin small_bank_sol_SmallBank.bin 2>/dev/null || true
+source_file="$1"
 
-echo "✓ 编译成功！"
-echo "文件更新:"
-echo "  - small_bank_sol_SmallBank.abi"
-echo "  - small_bank_sol_SmallBank.bin"
+if [[ ! -f "$source_file" ]]; then
+    echo "错误: 文件不存在 - $source_file"
+    exit 1
+fi
+
+contract_dir=$(dirname "$source_file")
+source_name=$(basename "$source_file")
+
+cd "$contract_dir"
+
+existing_files=""
+for f in *.abi *.bin; do
+    if [[ -f "$f" ]]; then
+        existing_files="$existing_files $f"
+    fi
+done
+
+echo "正在编译合约: $source_file"
+echo "输出目录: $contract_dir"
+
+docker run --rm -v "$(pwd):/sources" ethereum/solc:"$SOLC_VERSION" --optimize --abi --bin "/sources/$source_name" -o /sources --overwrite
+
+for file in *.abi *.bin; do
+    if [[ -f "$file" ]]; then
+        exists=0
+        for f in $existing_files; do
+            if [[ "$f" == "$file" ]]; then
+                exists=1
+                break
+            fi
+        done
+        if [[ $exists -eq 0 ]]; then
+            base_name="${file%.*}"
+            ext="${file##*.}"
+            new_name="${base_name}.${ext}"
+            mv -f "$file" "$new_name"
+            echo "✓ 生成: $new_name"
+        fi
+    fi
+done
+
+echo ""
+echo "✓ 编译完成！"

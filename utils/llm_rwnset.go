@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"math/big"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,9 +56,42 @@ func SetLLMConfig(config LLMConfig) {
 }
 
 var llmCache sync.Map
+var llmCacheDir = "./cache/llm"
+
+func init() {
+	if err := os.MkdirAll(llmCacheDir, 0755); err != nil {
+		fmt.Printf("Warning: failed to create LLM cache directory %s: %v\n", llmCacheDir, err)
+	}
+}
 
 func ClearLLMCache() {
 	llmCache = sync.Map{}
+}
+
+func getCacheFilePath(contractName, functionName string) string {
+	return fmt.Sprintf("%s/%s_%s.json", llmCacheDir, contractName, functionName)
+}
+
+func saveLLMCacheToFile(contractName, functionName string, resp *LLMResponse) error {
+	filePath := getCacheFilePath(contractName, functionName)
+	data, err := json.MarshalIndent(resp, "", "  ")
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(filePath, data, 0644)
+}
+
+func loadLLMCacheFromFile(contractName, functionName string) (*LLMResponse, error) {
+	filePath := getCacheFilePath(contractName, functionName)
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	var resp LLMResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 var ErrNotPreAnalyzed = fmt.Errorf("function not pre-analyzed")
@@ -93,7 +127,11 @@ func buildLLMPrompt(contractName, functionName string) string {
 	contractConfig, _ := cm.GetContractConfig(contractName)
 	fieldOptions := ""
 	for _, mapping := range contractConfig.StorageLayout {
-		fieldOptions += fmt.Sprintf("- \"%s\" - 对应 %s\n", strings.TrimSuffix(mapping.MappingName, "Store"), mapping.MappingName)
+		if mapping.KeyType == "simple" {
+			fieldOptions += fmt.Sprintf("- \"%s\" - 全局状态变量，account 填 \"global\"\n", mapping.MappingName)
+		} else {
+			fieldOptions += fmt.Sprintf("- \"%s\" - 对应 %s\n", strings.TrimSuffix(mapping.MappingName, "Store"), mapping.MappingName)
+		}
 	}
 
 	prompt := fmt.Sprintf(`你是一个智能合约分析专家。请分析以下 %s 合约中函数 "%s" 的保守读写集。
@@ -110,7 +148,8 @@ func buildLLMPrompt(contractName, functionName string) string {
 {
   "reads": [
     {"account": "addr1", "field": "checking"},
-    {"account": "addr2", "field": "saving"}
+    {"account": "addr2", "field": "saving"},
+    {"account": "global", "field": "feeRate"}
   ],
   "writes": [
     {"account": "addr1", "field": "checking"}
@@ -121,7 +160,7 @@ func buildLLMPrompt(contractName, functionName string) string {
 %s
 
 注意：
-1. account 只能是 "addr1" 或 "addr2"
+1. account 可以是 "addr1"、"addr2" 或 "global"（用于全局状态变量）
 2. 保守分析意味着包含所有可能被访问的存储位置
 3. 不要遗漏任何可能的分支路径
 4. 只返回JSON，不要包含其他文字`, contractName, functionName, sourceCode, argMappingStr, fieldOptions)
@@ -237,6 +276,12 @@ func PreAnalyzeContract(pairs []ContractFunctionPair) error {
 			continue
 		}
 
+		if cachedResp, err := loadLLMCacheFromFile(pair.ContractName, pair.FunctionName); err == nil {
+			llmCache.Store(cacheKey, cachedResp)
+			fmt.Printf("Function %s:%s loaded from file cache\n", pair.ContractName, pair.FunctionName)
+			continue
+		}
+
 		fmt.Printf("Pre-analyzing function: %s:%s\n", pair.ContractName, pair.FunctionName)
 		prompt := buildLLMPrompt(pair.ContractName, pair.FunctionName)
 		if prompt == "" {
@@ -251,6 +296,9 @@ func PreAnalyzeContract(pairs []ContractFunctionPair) error {
 		}
 
 		llmCache.Store(cacheKey, resp)
+		if err := saveLLMCacheToFile(pair.ContractName, pair.FunctionName, resp); err != nil {
+			fmt.Printf("Warning: failed to save cache to file for %s:%s: %v\n", pair.ContractName, pair.FunctionName, err)
+		}
 		fmt.Printf("Pre-analysis completed for %s:%s: reads=%d, writes=%d\n", pair.ContractName, pair.FunctionName, len(resp.Reads), len(resp.Writes))
 	}
 
@@ -263,6 +311,11 @@ func analyzeTransactionLLM(tx Transaction) (*LLMResponse, error) {
 
 	if cached, ok := llmCache.Load(cacheKey); ok {
 		return cached.(*LLMResponse), nil
+	}
+
+	if cachedResp, err := loadLLMCacheFromFile(tx.ContractName, tx.Function); err == nil {
+		llmCache.Store(cacheKey, cachedResp)
+		return cachedResp, nil
 	}
 
 	return nil, ErrNotPreAnalyzed
@@ -278,13 +331,20 @@ func llmResponseToRWSet(contractName string, resp *LLMResponse, addr1, addr2 uin
 
 	for _, access := range resp.Reads {
 		var accountID uint64
-		if access.Account == "addr1" {
-			accountID = addr1
+		var mappingName string
+
+		if access.Account == "global" {
+			mappingName = access.Field
+			accountID = 0
 		} else {
-			accountID = addr2
+			if access.Account == "addr1" {
+				accountID = addr1
+			} else {
+				accountID = addr2
+			}
+			mappingName = access.Field + "Store"
 		}
 
-		mappingName := access.Field + "Store"
 		key, err := cm.GetStorageKey(contractName, mappingName, accountID)
 		if err != nil {
 			fmt.Printf("Warning: failed to get storage key for %s:%s: %v\n", contractName, mappingName, err)
@@ -297,13 +357,20 @@ func llmResponseToRWSet(contractName string, resp *LLMResponse, addr1, addr2 uin
 
 	for _, access := range resp.Writes {
 		var accountID uint64
-		if access.Account == "addr1" {
-			accountID = addr1
+		var mappingName string
+
+		if access.Account == "global" {
+			mappingName = access.Field
+			accountID = 0
 		} else {
-			accountID = addr2
+			if access.Account == "addr1" {
+				accountID = addr1
+			} else {
+				accountID = addr2
+			}
+			mappingName = access.Field + "Store"
 		}
 
-		mappingName := access.Field + "Store"
 		key, err := cm.GetStorageKey(contractName, mappingName, accountID)
 		if err != nil {
 			fmt.Printf("Warning: failed to get storage key for %s:%s: %v\n", contractName, mappingName, err)

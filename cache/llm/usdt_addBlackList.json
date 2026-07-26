@@ -1,0 +1,9 @@
+{
+  "reads": [],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "isBlackListed"
+    }
+  ]
+}

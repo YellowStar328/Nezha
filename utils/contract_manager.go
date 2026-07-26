@@ -204,6 +204,10 @@ func (cm *ContractManager) GetStorageKey(contractName, mappingName string, accou
 		32,
 	)
 
+	if mappingDef.KeyType == "simple" {
+		return slotBytes, nil
+	}
+
 	var keyBytes []byte
 	if mappingDef.KeyType == "string" {
 		keyBytes = []byte(strconv.FormatUint(accountID, 10))

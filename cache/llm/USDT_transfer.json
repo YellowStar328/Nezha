@@ -1,0 +1,30 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "isBlackListed"
+    },
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "addr2",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "feeRate"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "addr2",
+      "field": "balances"
+    }
+  ]
+}

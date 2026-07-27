@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chinuy/zipf"
@@ -594,7 +595,7 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 			}
 		}
 	}
-	utils.InitEVMPool(dbFile, runtime.NumCPU())
+	utils.InitEVMPool(dbFile, runtime.NumCPU()*2)
 	start := time.Now()
 	start1 := time.Now()
 	scheduler, _ := core.Depurge_schedule(contexts)
@@ -617,312 +618,143 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 
 	start2 := time.Now()
 
-	levelIndex := int32(0)
 	totalPrunedKeys := 0
+	var committedStateLock sync.RWMutex
+	var inProgress int32
 
-	for scheduler.GetReadyQueueLen() > 0 {
-		currentLevelSize := scheduler.GetReadyQueueLen()
-		currentLevel := make([]string, 0, currentLevelSize)
+	validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
+		txID := i.(string)
 
-		for i := 0; i < currentLevelSize; i++ {
+		ctx, exists := contexts[txID]
+		if !exists {
+			fmt.Printf("  TX %s: aborted (context not found)\n", txID)
+			validationAborted++
+			scheduler.Abort(txID)
+			atomic.AddInt32(&inProgress, -1)
+			return
+		}
+
+		committedStateLock.RLock()
+		currentState := utils.CloneWriteSet(committedState)
+		committedStateLock.RUnlock()
+
+		realReadKeys, realWriteKeys, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, currentState)
+		if err != nil {
+			fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
+			validationAborted++
+			scheduler.Abort(txID)
+			atomic.AddInt32(&inProgress, -1)
+			return
+		}
+
+		conservativeKeys := scheduler.GetConservativeKeys(txID)
+		conservativeKeySet := make(map[string]bool)
+		for _, k := range conservativeKeys {
+			conservativeKeySet[k] = true
+		}
+
+		realKeySet := make(map[string]bool)
+		for _, k := range realReadKeys {
+			realKeySet[k] = true
+		}
+		for _, k := range realWriteKeys {
+			realKeySet[k] = true
+		}
+
+		abort := false
+		for key := range realKeySet {
+			if !conservativeKeySet[key] {
+				abort = true
+				break
+			}
+		}
+
+		if abort {
+			fmt.Printf("  TX %s: aborted (real keys exceed conservative keys) - function=%s, addr1=%d, addr2=%d\n",
+				txID, ctx.Function, ctx.Addr1, ctx.Addr2)
+			validationAborted++
+			scheduler.Abort(txID)
+			atomic.AddInt32(&inProgress, -1)
+			return
+		}
+
+		prunedKeys := make([]string, 0)
+		for _, key := range conservativeKeys {
+			if !realKeySet[key] {
+				prunedKeys = append(prunedKeys, key)
+			}
+		}
+		totalPrunedKeys += len(prunedKeys)
+
+		if len(prunedKeys) > 0 {
+			allRealKeys := append(realReadKeys, realWriteKeys...)
+			scheduler.Prune(txID, allRealKeys)
+		}
+
+		scheduler.Execute(txID)
+
+		fmt.Printf("  TX %s: validated and committed - function=%s, addr1=%d, addr2=%d\n",
+			txID, ctx.Function, ctx.Addr1, ctx.Addr2)
+
+		if len(prunedKeys) > 0 {
+			fmt.Printf("    TX %s: pruned %d keys - conservative:%d, real:%d\n",
+				txID, len(prunedKeys), len(conservativeKeys), len(realKeySet))
+		}
+
+		two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
+		committedStateLock.Lock()
+		for key, delta := range writeDelta {
+			var currentBig *big.Int
+			if currentVal, ok := committedState[key]; ok {
+				currentBig = new(big.Int).SetBytes(currentVal)
+			} else {
+				currentBig = big.NewInt(0)
+			}
+			newVal := new(big.Int).Add(currentBig, delta)
+
+			if newVal.Sign() < 0 {
+				newVal = new(big.Int).Add(newVal, two256)
+			}
+
+			committedState[key] = newVal.Bytes()
+		}
+		committedStateLock.Unlock()
+
+		for _, v := range txs {
+			if len(v) > 0 && v[0].TransInfo.ID == txID {
+				var wNodes []*core.RWNode
+				for _, n := range v {
+					if n.Label == "w" {
+						wNodes = append(wNodes, n)
+					}
+				}
+				commitOrder[0] = append(commitOrder[0], wNodes)
+				break
+			}
+		}
+
+		atomic.AddInt32(&inProgress, -1)
+	})
+	defer validatePool.Release()
+
+	for scheduler.GetReadyQueueLen() > 0 || scheduler.GetPruneReadyQueueLen() > 0 || atomic.LoadInt32(&inProgress) > 0 {
+		for scheduler.GetReadyQueueLen() > 0 {
 			txID := scheduler.PopReady()
 			if txID == "" {
 				break
 			}
-			currentLevel = append(currentLevel, txID)
-		}
-
-		if len(currentLevel) == 0 {
-			continue
-		}
-
-		fmt.Printf("\nLevel %d:  \n", levelIndex)
-		levelState := utils.CloneWriteSet(committedState)
-
-		var validTransactions []validatedTransaction
-		var validLock sync.Mutex
-		var abortLock sync.Mutex
-
-		var validateWg sync.WaitGroup
-		validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
-			txID := i.(string)
-
-			ctx, exists := contexts[txID]
-			if !exists {
-				fmt.Printf("  TX %s: aborted (context not found)\n", txID)
-				abortLock.Lock()
-				validationAborted++
-				abortLock.Unlock()
-				scheduler.Abort(txID)
-				validateWg.Done()
-				return
-			}
-
-			realReadKeys, realWriteKeys, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, levelState)
-			if err != nil {
-				fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
-				abortLock.Lock()
-				validationAborted++
-				abortLock.Unlock()
-				scheduler.Abort(txID)
-				validateWg.Done()
-				return
-			}
-
-			conservativeKeys := scheduler.GetConservativeKeys(txID)
-			// fmt.Printf("  TX %s: conservative keys=%v, real read keys=%v, real write keys=%v\n",
-			// 	txID, conservativeKeys, realReadKeys, realWriteKeys)
-			conservativeKeySet := make(map[string]bool)
-			for _, k := range conservativeKeys {
-				conservativeKeySet[k] = true
-			}
-
-			realKeySet := make(map[string]bool)
-			for _, k := range realReadKeys {
-				realKeySet[k] = true
-			}
-			for _, k := range realWriteKeys {
-				realKeySet[k] = true
-			}
-
-			abort := false
-			for key := range realKeySet {
-				if !conservativeKeySet[key] {
-					abort = true
-					break
-				}
-			}
-
-			if abort {
-				fmt.Printf("  TX %s: aborted (real keys exceed conservative keys) - function=%s, addr1=%d, addr2=%d\n",
-					txID, ctx.Function, ctx.Addr1, ctx.Addr2)
-				abortLock.Lock()
-				validationAborted++
-				abortLock.Unlock()
-				scheduler.Abort(txID)
-				validateWg.Done()
-				return
-			}
-
-			prunedKeys := make([]string, 0)
-			for _, key := range conservativeKeys {
-				if !realKeySet[key] {
-					prunedKeys = append(prunedKeys, key)
-				}
-			}
-			totalPrunedKeys += len(prunedKeys)
-
-			if len(prunedKeys) > 0 {
-				allRealKeys := append(realReadKeys, realWriteKeys...)
-				scheduler.Prune(txID, allRealKeys)
-			}
-
-			scheduler.Execute(txID)
-
-			validLock.Lock()
-			validTransactions = append(validTransactions, validatedTransaction{
-				txID:         txID,
-				writeDelta:   writeDelta,
-				realRead:     realReadKeys,
-				realWrite:    realWriteKeys,
-				conservative: conservativeKeys,
-				prunedKeys:   prunedKeys,
-				realKeySet:   realKeySet,
-			})
-			validLock.Unlock()
-
-			validateWg.Done()
-		})
-
-		for _, txID := range currentLevel {
-			validateWg.Add(1)
+			atomic.AddInt32(&inProgress, 1)
 			_ = validatePool.Invoke(txID)
 		}
 
-		validateWg.Wait()
-		validatePool.Release()
-
-		if len(validTransactions) > 0 {
-			validTxIDs := make([]string, 0, len(validTransactions))
-			for _, vt := range validTransactions {
-				validTxIDs = append(validTxIDs, vt.txID)
-			}
-			fmt.Printf("\n %d transactions committed - %v\n", len(validTxIDs), validTxIDs)
-		} else {
-			fmt.Printf("\n 0 transactions committed\n")
-		}
-
-		for _, validTx := range validTransactions {
-			if len(validTx.prunedKeys) > 0 {
-				fmt.Printf("  TX %s: pruned %d keys (%v) - conservative:%d, real:%d\n",
-					validTx.txID,
-					len(validTx.prunedKeys),
-					validTx.prunedKeys,
-					len(validTx.conservative),
-					len(validTx.realKeySet))
-			}
-		}
-
 		for scheduler.GetPruneReadyQueueLen() > 0 {
-			pruneReleasedCount := scheduler.GetPruneReadyQueueLen()
-			pruneReleasedTxs := make([]string, 0, pruneReleasedCount)
-			for i := 0; i < pruneReleasedCount; i++ {
-				txID := scheduler.PopPruneReady()
-				if txID != "" {
-					pruneReleasedTxs = append(pruneReleasedTxs, txID)
-				}
+			txID := scheduler.PopPruneReady()
+			if txID == "" {
+				break
 			}
-			fmt.Printf("  %d transactions released by pruning: %v\n", pruneReleasedCount, pruneReleasedTxs)
-
-			var pruneValidTransactions []validatedTransaction
-			var pruneValidLock sync.Mutex
-			var pruneAbortLock sync.Mutex
-
-			var pruneValidateWg sync.WaitGroup
-			pruneValidatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
-				txID := i.(string)
-
-				ctx, exists := contexts[txID]
-				if !exists {
-					fmt.Printf("  TX %s: aborted (context not found)\n", txID)
-					pruneAbortLock.Lock()
-					validationAborted++
-					pruneAbortLock.Unlock()
-					scheduler.Abort(txID)
-					pruneValidateWg.Done()
-					return
-				}
-
-				realReadKeys, realWriteKeys, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, levelState)
-				if err != nil {
-					fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
-					pruneAbortLock.Lock()
-					validationAborted++
-					pruneAbortLock.Unlock()
-					scheduler.Abort(txID)
-					pruneValidateWg.Done()
-					return
-				}
-
-				conservativeKeys := scheduler.GetConservativeKeys(txID)
-				conservativeKeySet := make(map[string]bool)
-				for _, k := range conservativeKeys {
-					conservativeKeySet[k] = true
-				}
-
-				realKeySet := make(map[string]bool)
-				for _, k := range realReadKeys {
-					realKeySet[k] = true
-				}
-				for _, k := range realWriteKeys {
-					realKeySet[k] = true
-				}
-
-				abort := false
-				for key := range realKeySet {
-					if !conservativeKeySet[key] {
-						abort = true
-						break
-					}
-				}
-
-				if abort {
-					fmt.Printf("  TX %s: aborted (real keys exceed conservative keys) - function=%s, addr1=%d, addr2=%d\n",
-						txID, ctx.Function, ctx.Addr1, ctx.Addr2)
-					pruneAbortLock.Lock()
-					validationAborted++
-					pruneAbortLock.Unlock()
-					scheduler.Abort(txID)
-					pruneValidateWg.Done()
-					return
-				}
-
-				prunedKeys := make([]string, 0)
-				for _, key := range conservativeKeys {
-					if !realKeySet[key] {
-						prunedKeys = append(prunedKeys, key)
-					}
-				}
-				totalPrunedKeys += len(prunedKeys)
-
-				if len(prunedKeys) > 0 {
-					allRealKeys := append(realReadKeys, realWriteKeys...)
-					scheduler.Prune(txID, allRealKeys)
-				}
-
-				scheduler.Execute(txID)
-
-				pruneValidLock.Lock()
-				pruneValidTransactions = append(pruneValidTransactions, validatedTransaction{
-					txID:         txID,
-					writeDelta:   writeDelta,
-					realRead:     realReadKeys,
-					realWrite:    realWriteKeys,
-					conservative: conservativeKeys,
-					prunedKeys:   prunedKeys,
-				})
-				pruneValidLock.Unlock()
-
-				pruneValidateWg.Done()
-			})
-
-			for _, txID := range pruneReleasedTxs {
-				pruneValidateWg.Add(1)
-				_ = pruneValidatePool.Invoke(txID)
-			}
-
-			pruneValidateWg.Wait()
-			pruneValidatePool.Release()
-
-			for _, validTx := range pruneValidTransactions {
-				if len(validTx.prunedKeys) > 0 {
-					fmt.Printf("  TX %s: pruned %d keys (%v) - conservative:%d, real:%d\n",
-						validTx.txID,
-						len(validTx.prunedKeys),
-						validTx.prunedKeys,
-						len(validTx.conservative),
-						len(validTx.realRead)+len(validTx.realWrite))
-				}
-			}
-
-			validTransactions = append(validTransactions, pruneValidTransactions...)
+			atomic.AddInt32(&inProgress, 1)
+			_ = validatePool.Invoke(txID)
 		}
-
-		for _, validTx := range validTransactions {
-			for _, v := range txs {
-				if len(v) > 0 && v[0].TransInfo.ID == validTx.txID {
-					var wNodes []*core.RWNode
-					for _, n := range v {
-						if n.Label == "w" {
-							wNodes = append(wNodes, n)
-						}
-					}
-					commitOrder[levelIndex] = append(commitOrder[levelIndex], wNodes)
-					break
-				}
-			}
-		}
-
-		two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
-		for _, tx := range validTransactions {
-			for key, delta := range tx.writeDelta {
-				var currentBig *big.Int
-				if currentVal, ok := committedState[key]; ok {
-					currentBig = new(big.Int).SetBytes(currentVal)
-				} else {
-					currentBig = big.NewInt(0)
-				}
-				newVal := new(big.Int).Add(currentBig, delta)
-
-				if newVal.Sign() < 0 {
-					newVal = new(big.Int).Add(newVal, two256)
-				}
-
-				committedState[key] = newVal.Bytes()
-			}
-		}
-
-		levelIndex++
 	}
 
 	duration2 := time.Since(start2)

@@ -2,13 +2,13 @@
   "reads": [
     {
       "account": "addr1",
-      "field": "checking"
+      "field": "checkingStore"
     }
   ],
   "writes": [
     {
       "account": "addr1",
-      "field": "checking"
+      "field": "checkingStore"
     }
   ]
 }

@@ -51,7 +51,7 @@ contracts:
         fixed_args:
           arg1: 20
   - name: USDT
-    weight: 1
+    weight: 0
     abi_path: "./contracts/USDT/USDT.abi"
     bin_path: "./contracts/USDT/USDT.bin"
     source_path: "./contracts/USDT/usdt.sol"
@@ -83,3 +83,47 @@ contracts:
           arg1: addr2
         fixed_args:
           arg2: 100
+  - name: DexRouter
+    weight: 1
+    abi_path: "./contracts/DexRouter/DexRouter.abi"
+    bin_path: "./contracts/DexRouter/DexRouter.bin"
+    source_path: "./contracts/DexRouter/DexRouter.sol"
+    storage_layout:
+      # Slot 0: 对应 mapping(string => uint256) public poolLiquidity;
+      - mapping_name: poolLiquidity
+        slot: 2
+        key_type: string
+      # Slot 1: 对应 mapping(string => uint256) public userBalances;
+      - mapping_name: userBalances
+        slot: 3
+        key_type: string
+      # Slot 2: 对应 string public pool1;
+      - mapping_name: pool3
+        slot: 0
+        key_type: simple
+      # Slot 3: 对应 string public pool2;
+      - mapping_name: pool4
+        slot: 1
+        key_type: simple
+    functions:
+      # 用于在预热阶段给测试用户发钱
+      - name: initAccount
+        args: 2
+        arg_mapping:
+          arg0: addr1
+        fixed_args:
+          arg1: 100000
+      # 用于在预热阶段初始化资金池
+      - name: initPool
+        args: 2
+        arg_mapping:
+          arg0: addr1 
+        fixed_args:
+          arg1: 1000
+      # 压测阶段的高并发冲突目标函数
+      - name: swap
+        args: 2
+        arg_mapping:
+          arg0: addr1      # 动态参数：随机选取压测用户
+        fixed_args:
+          arg1: 100        # 固定参数：每次交换 100 的金额

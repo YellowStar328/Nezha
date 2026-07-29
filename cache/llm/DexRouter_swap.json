@@ -1,0 +1,38 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "userBalances"
+    },
+    {
+      "account": "global",
+      "field": "pool3"
+    },
+    {
+      "account": "global",
+      "field": "pool4"
+    },
+    {
+      "account": "pool3",
+      "field": "poolLiquidity"
+    },
+    {
+      "account": "pool4",
+      "field": "poolLiquidity"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "userBalances"
+    },
+    {
+      "account": "pool3",
+      "field": "poolLiquidity"
+    },
+    {
+      "account": "pool4",
+      "field": "poolLiquidity"
+    }
+  ]
+}

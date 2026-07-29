@@ -61,6 +61,12 @@ func ConvertByte2String(bytes []byte) string {
 	return newString
 }
 
+// LLMAccess 保存 LLM 原始的访问描述
+type LLMAccess struct {
+	Account string `json:"account"`
+	Field   string `json:"field"`
+}
+
 // TransactionContext 记录预执行的交易上下文（用于后续验证）
 // 注意：不直接引用 utils.Transaction，避免循环依赖
 type TransactionContext struct {
@@ -74,6 +80,8 @@ type TransactionContext struct {
 	PreWriteDelta map[string]*big.Int // key -> delta (write - read)
 	FromAddr      common.Address
 	ContractAddr  common.Address
+	LLMReads      []LLMAccess         // LLM 原始的读访问描述
+	LLMWrites     []LLMAccess         // LLM 原始的写访问描述
 }
 
 // RWNodesToContext 辅助函数：将 []*RWNode 转换为 TransactionContext

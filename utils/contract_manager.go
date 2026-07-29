@@ -221,6 +221,131 @@ func (cm *ContractManager) GetStorageKey(contractName, mappingName string, accou
 	return h.Sum(nil), nil
 }
 
+func (cm *ContractManager) GetStorageKeyWithValue(contractName, mappingName string, keyValue string) ([]byte, error) {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	contractConfig, ok := cm.GetContractConfig(contractName)
+	if !ok {
+		return nil, fmt.Errorf("contract %s not found", contractName)
+	}
+
+	var mappingDef *StorageMapping
+	for i := range contractConfig.StorageLayout {
+		if contractConfig.StorageLayout[i].MappingName == mappingName {
+			mappingDef = &contractConfig.StorageLayout[i]
+			break
+		}
+	}
+	if mappingDef == nil {
+		return nil, fmt.Errorf("mapping %s not found in contract %s", mappingName, contractName)
+	}
+
+	slotBytes := common.LeftPadBytes(
+		big.NewInt(int64(mappingDef.Slot)).Bytes(),
+		32,
+	)
+
+	if mappingDef.KeyType == "simple" {
+		return slotBytes, nil
+	}
+
+	var keyBytes []byte
+	if mappingDef.KeyType == "string" {
+		keyBytes = []byte(keyValue)
+	} else {
+		keyBytes = common.LeftPadBytes([]byte(keyValue), 32)
+	}
+
+	data := append(keyBytes, slotBytes...)
+	h := sha3.NewLegacyKeccak256()
+	h.Write(data)
+	return h.Sum(nil), nil
+}
+
+func (cm *ContractManager) GetGlobalVarKey(contractName, varName string) ([]byte, error) {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	contractConfig, ok := cm.GetContractConfig(contractName)
+	if !ok {
+		return nil, fmt.Errorf("contract %s not found", contractName)
+	}
+
+	var mappingDef *StorageMapping
+	for i := range contractConfig.StorageLayout {
+		if contractConfig.StorageLayout[i].MappingName == varName {
+			mappingDef = &contractConfig.StorageLayout[i]
+			break
+		}
+	}
+	if mappingDef == nil {
+		return nil, fmt.Errorf("variable %s not found in contract %s", varName, contractName)
+	}
+
+	if mappingDef.KeyType != "simple" {
+		return nil, fmt.Errorf("variable %s is not a global variable (key_type: %s)", varName, mappingDef.KeyType)
+	}
+
+	slotBytes := common.LeftPadBytes(
+		big.NewInt(int64(mappingDef.Slot)).Bytes(),
+		32,
+	)
+
+	return slotBytes, nil
+}
+
+// GetGlobalVarKeccakSlotKey 获取全局变量的 keccak256(slot) 键
+// 用于处理动态类型变量（如 string）的存储访问
+func (cm *ContractManager) GetGlobalVarKeccakSlotKey(contractName, varName string) ([]byte, error) {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	contractConfig, ok := cm.GetContractConfig(contractName)
+	if !ok {
+		return nil, fmt.Errorf("contract %s not found", contractName)
+	}
+
+	var mappingDef *StorageMapping
+	for i := range contractConfig.StorageLayout {
+		if contractConfig.StorageLayout[i].MappingName == varName {
+			mappingDef = &contractConfig.StorageLayout[i]
+			break
+		}
+	}
+	if mappingDef == nil {
+		return nil, fmt.Errorf("variable %s not found in contract %s", varName, contractName)
+	}
+
+	// 计算 keccak256(slot)
+	slotBytes := common.LeftPadBytes(
+		big.NewInt(int64(mappingDef.Slot)).Bytes(),
+		32,
+	)
+
+	h := sha3.NewLegacyKeccak256()
+	h.Write(slotBytes)
+	return h.Sum(nil), nil
+}
+
+func (cm *ContractManager) GetGlobalVarNames(contractName string) []string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	contractConfig, ok := cm.GetContractConfig(contractName)
+	if !ok {
+		return nil
+	}
+
+	var names []string
+	for _, mapping := range contractConfig.StorageLayout {
+		if mapping.KeyType == "simple" {
+			names = append(names, mapping.MappingName)
+		}
+	}
+	return names
+}
+
 func (cm *ContractManager) RandomSelectContract(r *rand.Rand) *ContractConfig {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()

@@ -2,21 +2,21 @@
   "reads": [
     {
       "account": "addr1",
-      "field": "saving"
+      "field": "savingStore"
     },
     {
       "account": "addr2",
-      "field": "checking"
+      "field": "checkingStore"
     }
   ],
   "writes": [
     {
       "account": "addr1",
-      "field": "checking"
+      "field": "checkingStore"
     },
     {
       "account": "addr2",
-      "field": "saving"
+      "field": "savingStore"
     }
   ]
 }

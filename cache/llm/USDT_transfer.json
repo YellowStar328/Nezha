@@ -2,15 +2,15 @@
   "reads": [
     {
       "account": "addr1",
-      "field": "isBlackListed"
+      "field": "isBlackListedStore"
     },
     {
       "account": "addr1",
-      "field": "balances"
+      "field": "balancesStore"
     },
     {
       "account": "addr2",
-      "field": "balances"
+      "field": "balancesStore"
     },
     {
       "account": "global",
@@ -20,11 +20,11 @@
   "writes": [
     {
       "account": "addr1",
-      "field": "balances"
+      "field": "balancesStore"
     },
     {
       "account": "addr2",
-      "field": "balances"
+      "field": "balancesStore"
     }
   ]
 }

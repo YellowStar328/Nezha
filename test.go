@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -571,6 +572,196 @@ func TestAppConcurrency(txNum int, blksize int, con int, addrNum uint64, skew fl
 	fmt.Printf("Abort rate is: %.3f\n", float64(count)/float64(txNum))
 }
 
+// makeCompositeKey 生成复合键 contractName:storageKey
+func makeCompositeKey(contractName, storageKey string) string {
+	return contractName + ":" + storageKey
+}
+
+// filterContractState 从全局 committedState 中提取指定合约的状态
+func filterContractState(committedState map[string][]byte, contractName string) map[string][]byte {
+	result := make(map[string][]byte)
+	prefix := contractName + ":"
+	for compositeKey, value := range committedState {
+		if strings.HasPrefix(compositeKey, prefix) {
+			storageKey := compositeKey[len(prefix):]
+			result[storageKey] = value
+		}
+	}
+	return result
+}
+
+// updateCommittedState 更新合约的 committedState（使用复合键）
+func updateCommittedState(committedState map[string][]byte, contractName string, writeDelta map[string]*big.Int) {
+	two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
+	for key, delta := range writeDelta {
+		compositeKey := makeCompositeKey(contractName, key)
+		var currentBig *big.Int
+		if currentVal, ok := committedState[compositeKey]; ok {
+			currentBig = new(big.Int).SetBytes(currentVal)
+		} else {
+			currentBig = big.NewInt(0)
+		}
+		newVal := new(big.Int).Add(currentBig, delta)
+
+		if newVal.Sign() < 0 {
+			newVal = new(big.Int).Add(newVal, two256)
+		}
+
+		committedState[compositeKey] = newVal.Bytes()
+	}
+}
+
+// decodeSolidityShortString 解码 Solidity 短字符串存储格式
+// 短字符串（长度 <= 31 字节）存储在单个 slot 中：
+// - 32 字节，最低字节存储 length*2，前 31 字节存储实际内容
+func decodeSolidityShortString(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+
+	// 获取最后一个字节作为 length*2
+	lengthMarker := data[len(data)-1]
+	strLen := int(lengthMarker / 2)
+
+	if strLen == 0 {
+		return ""
+	}
+
+	// 提取字符串内容（前 strLen 个字节）
+	if strLen > len(data)-1 {
+		strLen = len(data) - 1
+	}
+
+	return string(data[:strLen])
+}
+
+// resolveAccessKey 根据 LLM 访问描述和 currentState 计算正确的存储键
+func resolveAccessKeys(cm *utils.ContractManager, contractName string, access core.LLMAccess, addr1, addr2 uint64, currentState map[string][]byte) []string {
+	var keys []string
+	seen := make(map[string]bool)
+
+	addKey := func(key string) {
+		if key != "" && !seen[key] {
+			keys = append(keys, key)
+			seen[key] = true
+		}
+	}
+
+	if access.Account == "global" {
+		// 直接访问全局变量，返回变量本身的键
+		key, err := cm.GetGlobalVarKey(contractName, access.Field)
+		if err != nil {
+			return nil
+		}
+		addKey(core.ConvertByte2String(key))
+
+		// 同时添加 keccak256(slot) 作为保守键（用于动态类型变量的存储访问）
+		keccakSlotKey, err := cm.GetGlobalVarKeccakSlotKey(contractName, access.Field)
+		if err == nil {
+			addKey(core.ConvertByte2String(keccakSlotKey))
+		}
+
+		return keys
+	}
+
+	if access.Account == "addr1" || access.Account == "addr2" {
+		// 用函数参数作为键访问 mapping
+		var accountID uint64
+		if access.Account == "addr1" {
+			accountID = addr1
+		} else {
+			accountID = addr2
+		}
+		key, err := cm.GetStorageKey(contractName, access.Field, accountID)
+		if err != nil {
+			return nil
+		}
+		addKey(core.ConvertByte2String(key))
+		return keys
+	}
+
+	// account 是全局变量名（如 "pool1", "pool2"）
+	// 需要从 currentState 中获取该变量的值
+	globalVarKey, err := cm.GetGlobalVarKey(contractName, access.Account)
+	if err != nil {
+		return nil
+	}
+
+	globalVarKeyStr := core.ConvertByte2String(globalVarKey)
+	globalVarValue, exists := currentState[globalVarKeyStr]
+
+	if !exists || len(globalVarValue) == 0 {
+		// 全局变量没有值，使用空字符串作为键
+		key, err := cm.GetStorageKeyWithValue(contractName, access.Field, "")
+		if err != nil {
+			return nil
+		}
+		addKey(core.ConvertByte2String(key))
+	} else {
+		// 解码 Solidity 短字符串获取实际键值
+		keyValue := decodeSolidityShortString(globalVarValue)
+
+		// 用全局变量的值作为键来访问 mapping
+		key, err := cm.GetStorageKeyWithValue(contractName, access.Field, keyValue)
+		if err == nil {
+			addKey(core.ConvertByte2String(key))
+		}
+
+		// 同时添加空字符串作为键（保守估计：变量可能在未来变为空）
+		emptyKey, err := cm.GetStorageKeyWithValue(contractName, access.Field, "")
+		if err == nil {
+			addKey(core.ConvertByte2String(emptyKey))
+		}
+	}
+
+	// 同时添加全局变量本身的键（读取变量值）
+	addKey(globalVarKeyStr)
+
+	// 同时添加全局变量的 keccak256(slot) 键（用于动态类型变量的存储访问）
+	keccakSlotKey, err := cm.GetGlobalVarKeccakSlotKey(contractName, access.Account)
+	if err == nil {
+		addKey(core.ConvertByte2String(keccakSlotKey))
+	}
+
+	return keys
+}
+
+// recalculateConservativeKeys 根据 LLM 原始响应和 currentState 动态重新计算保守键
+func recalculateConservativeKeys(ctx *core.TransactionContext, currentState map[string][]byte) []string {
+	cm := utils.GetContractManager()
+	if cm == nil {
+		return nil
+	}
+
+	var keys []string
+	seen := make(map[string]bool)
+
+	addKey := func(key string) {
+		if key != "" && !seen[key] {
+			keys = append(keys, key)
+			seen[key] = true
+		}
+	}
+
+	// 处理读访问
+	for _, access := range ctx.LLMReads {
+		accessKeys := resolveAccessKeys(cm, ctx.ContractName, access, ctx.Addr1, ctx.Addr2, currentState)
+		for _, key := range accessKeys {
+			addKey(key)
+		}
+	}
+
+	// 处理写访问
+	for _, access := range ctx.LLMWrites {
+		accessKeys := resolveAccessKeys(cm, ctx.ContractName, access, ctx.Addr1, ctx.Addr2, currentState)
+		for _, key := range accessKeys {
+			addKey(key)
+		}
+	}
+
+	return keys
+}
+
 // TestDepurge test
 func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
 
@@ -635,10 +826,10 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 		}
 
 		committedStateLock.RLock()
-		currentState := utils.CloneWriteSet(committedState)
+		contractState := filterContractState(committedState, ctx.ContractName)
 		committedStateLock.RUnlock()
 
-		realReadKeys, realWriteKeys, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, currentState)
+		realReadKeys, realWriteKeys, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, contractState)
 		if err != nil {
 			fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
 			validationAborted++
@@ -648,6 +839,13 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 		}
 
 		conservativeKeys := scheduler.GetConservativeKeys(txID)
+
+		// 动态重新计算保守键（处理全局变量作为键的情况）
+		dynamicConservativeKeys := recalculateConservativeKeys(ctx, contractState)
+		if len(dynamicConservativeKeys) > 0 {
+			conservativeKeys = dynamicConservativeKeys
+		}
+
 		conservativeKeySet := make(map[string]bool)
 		for _, k := range conservativeKeys {
 			conservativeKeySet[k] = true
@@ -672,6 +870,30 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 		if abort {
 			fmt.Printf("  TX %s: aborted (real keys exceed conservative keys) - function=%s, addr1=%d, addr2=%d\n",
 				txID, ctx.Function, ctx.Addr1, ctx.Addr2)
+			fmt.Printf("    Conservative Keys (%d):\n", len(conservativeKeys))
+			for _, k := range conservativeKeys {
+				fmt.Printf("      - %s\n", k)
+			}
+			fmt.Printf("    Real Read Keys (%d):\n", len(realReadKeys))
+			for _, k := range realReadKeys {
+				fmt.Printf("      - %s\n", k)
+			}
+			fmt.Printf("    Real Write Keys (%d):\n", len(realWriteKeys))
+			for _, k := range realWriteKeys {
+				fmt.Printf("      - %s\n", k)
+			}
+			var missingKeys []string
+			for key := range realKeySet {
+				if !conservativeKeySet[key] {
+					missingKeys = append(missingKeys, key)
+				}
+			}
+			fmt.Printf("    Missing Keys (real not in conservative) (%d):\n", len(missingKeys))
+			for _, k := range missingKeys {
+				fmt.Printf("      - %s\n", k)
+			}
+			fmt.Printf("    LLM Reads: %v\n", ctx.LLMReads)
+			fmt.Printf("    LLM Writes: %v\n", ctx.LLMWrites)
 			validationAborted++
 			scheduler.Abort(txID)
 			atomic.AddInt32(&inProgress, -1)
@@ -701,23 +923,8 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 				txID, len(prunedKeys), len(conservativeKeys), len(realKeySet))
 		}
 
-		two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
 		committedStateLock.Lock()
-		for key, delta := range writeDelta {
-			var currentBig *big.Int
-			if currentVal, ok := committedState[key]; ok {
-				currentBig = new(big.Int).SetBytes(currentVal)
-			} else {
-				currentBig = big.NewInt(0)
-			}
-			newVal := new(big.Int).Add(currentBig, delta)
-
-			if newVal.Sign() < 0 {
-				newVal = new(big.Int).Add(newVal, two256)
-			}
-
-			committedState[key] = newVal.Bytes()
-		}
+		updateCommittedState(committedState, ctx.ContractName, writeDelta)
 		committedStateLock.Unlock()
 
 		for _, v := range txs {

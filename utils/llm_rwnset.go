@@ -45,7 +45,7 @@ type LLMConfig struct {
 
 var llmConfig = LLMConfig{
 	APIEndpoint: "https://api.deepseek.com/chat/completions",
-	APIKey:      "sk-e788e33be40844c5a56c74bcda30cd95",
+	APIKey:      "sk-4f1ea5af9bf64cb9acee837bd2fd33e8",
 	MaxRetries:  3,
 	Timeout:     30 * time.Second,
 	Concurrency: 5,
@@ -126,15 +126,17 @@ func buildLLMPrompt(contractName, functionName string) string {
 
 	contractConfig, _ := cm.GetContractConfig(contractName)
 	fieldOptions := ""
+	globalVars := ""
 	for _, mapping := range contractConfig.StorageLayout {
 		if mapping.KeyType == "simple" {
-			fieldOptions += fmt.Sprintf("- \"%s\" - 全局状态变量，account 填 \"global\"\n", mapping.MappingName)
+			fieldOptions += fmt.Sprintf("- \"%s\" - 全局状态变量\n", mapping.MappingName)
+			globalVars += fmt.Sprintf("- \"%s\"\n", mapping.MappingName)
 		} else {
 			fieldOptions += fmt.Sprintf("- \"%s\" - 对应 %s\n", strings.TrimSuffix(mapping.MappingName, "Store"), mapping.MappingName)
 		}
 	}
 
-	prompt := fmt.Sprintf(`你是一个智能合约分析专家。请分析以下 %s 合约中函数 "%s" 的保守读写集。
+	prompt := fmt.Sprintf(`分析以下 %s 合约中函数 "%s" 的保守读写集。直接返回JSON格式，不要任何分析文字。
 
 合约代码：
 %s
@@ -142,28 +144,22 @@ func buildLLMPrompt(contractName, functionName string) string {
 参数映射规则：
 %s
 
-请返回保守的读写集（包含所有可能访问的存储位置，即使在某些条件下可能不被访问）。
-
-返回格式要求（JSON格式，只返回保守读写集JSON）：
-{
-  "reads": [
-    {"account": "addr1", "field": "checking"},
-    {"account": "addr2", "field": "saving"},
-    {"account": "global", "field": "feeRate"}
-  ],
-  "writes": [
-    {"account": "addr1", "field": "checking"}
-  ]
-}
-
 字段选项：
 %s
 
-注意：
-1. account 可以是 "addr1"、"addr2" 或 "global"（用于全局状态变量）
-2. 保守分析意味着包含所有可能被访问的存储位置
-3. 不要遗漏任何可能的分支路径
-4. 只返回JSON，不要包含其他文字`, contractName, functionName, sourceCode, argMappingStr, fieldOptions)
+全局变量列表（key_type为simple的字段）：
+%s
+
+重要规则：
+1. 直接访问全局变量（如读取pool1的值）：{"account": "global", "field": "pool1"}
+2. 用全局变量的值作为键访问mapping（如poolLiquidity[pool1]）：{"account": "pool1", "field": "poolLiquidity"}
+3. 用函数参数作为键访问mapping（如poolLiquidity[addr1]）：{"account": "addr1", "field": "poolLiquidity"}
+4. account可以是：addr1、addr2（函数参数）、global（直接访问全局变量）、或某个全局变量名（用该变量的值作为键）
+5. 保守规则：对于if/else等条件语句，必须包含两个分支中所有可能的存储访问。例如，如果else分支中使用了pool2，则必须包含对pool2的读取和写入（如果有）
+6. 对于mapping访问，即使条件分支可能不执行，也要保守地包含所有可能的mapping访问
+
+返回示例：
+{"reads":[{"account":"addr1","field":"userBalances"},{"account":"global","field":"pool1"},{"account":"global","field":"pool2"},{"account":"pool1","field":"poolLiquidity"},{"account":"pool2","field":"poolLiquidity"}],"writes":[{"account":"addr1","field":"userBalances"},{"account":"pool1","field":"poolLiquidity"},{"account":"pool2","field":"poolLiquidity"}]}`, contractName, functionName, sourceCode, argMappingStr, fieldOptions, globalVars)
 
 	return prompt
 }
@@ -175,7 +171,7 @@ func callLLM(prompt string) (*LLMResponse, error) {
 			{"role": "user", "content": prompt},
 		},
 		"temperature": 0.0,
-		"max_tokens":  500,
+		"max_tokens":  5000,
 	}
 
 	reqBytes, err := json.Marshal(reqBody)
@@ -239,7 +235,8 @@ func callLLM(prompt string) (*LLMResponse, error) {
 	var result struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
@@ -253,6 +250,10 @@ func callLLM(prompt string) (*LLMResponse, error) {
 	}
 
 	content := strings.TrimSpace(result.Choices[0].Message.Content)
+	if content == "" {
+		content = strings.TrimSpace(result.Choices[0].Message.ReasoningContent)
+	}
+
 	content = strings.TrimPrefix(content, "```json")
 	content = strings.TrimSuffix(content, "```")
 	content = strings.TrimSpace(content)
@@ -261,8 +262,6 @@ func callLLM(prompt string) (*LLMResponse, error) {
 	if err := json.Unmarshal([]byte(content), &llmResp); err != nil {
 		return nil, fmt.Errorf("failed to parse LLM response: %v, content: %s", err, content)
 	}
-
-	fmt.Printf("LLM parsed response: reads=%+v, writes=%+v\n", llmResp.Reads, llmResp.Writes)
 
 	return &llmResp, nil
 }
@@ -329,59 +328,106 @@ func llmResponseToRWSet(contractName string, resp *LLMResponse, addr1, addr2 uin
 		return rAddr, rValue, wAddr, wValue
 	}
 
-	for _, access := range resp.Reads {
-		var accountID uint64
+	globalVarNames := cm.GetGlobalVarNames(contractName)
+	globalVarSet := make(map[string]bool)
+	for _, name := range globalVarNames {
+		globalVarSet[name] = true
+	}
+
+	processAccess := func(access LLMFieldAccess) (key []byte, err error) {
 		var mappingName string
 
 		if access.Account == "global" {
 			mappingName = access.Field
-			accountID = 0
-		} else {
+			return cm.GetStorageKey(contractName, mappingName, 0)
+		}
+
+		if access.Account == "addr1" || access.Account == "addr2" {
+			var accountID uint64
 			if access.Account == "addr1" {
 				accountID = addr1
 			} else {
 				accountID = addr2
 			}
-			mappingName = access.Field + "Store"
+			mappingName = access.Field
+			return cm.GetStorageKey(contractName, mappingName, accountID)
 		}
 
-		key, err := cm.GetStorageKey(contractName, mappingName, accountID)
+		// account 是全局变量名（如 "pool1", "pool2"）
+		if globalVarSet[access.Account] {
+			mappingName = access.Field
+			// 预分析阶段没有 currentState，使用 accountID=0 作为占位符
+			// 验证阶段会动态重新计算
+			return cm.GetStorageKey(contractName, mappingName, 0)
+		}
+
+		// 默认情况
+		mappingName = access.Field
+		return cm.GetStorageKey(contractName, mappingName, 0)
+	}
+
+	for _, access := range resp.Reads {
+		key, err := processAccess(access)
 		if err != nil {
-			fmt.Printf("Warning: failed to get storage key for %s:%s: %v\n", contractName, mappingName, err)
+			fmt.Printf("Warning: failed to get storage key for %s:%s: %v\n", contractName, access.Field, err)
 			continue
 		}
-
 		rAddr = append(rAddr, key)
 		rValue = append(rValue, big.NewInt(0).Bytes())
 	}
 
 	for _, access := range resp.Writes {
-		var accountID uint64
-		var mappingName string
-
-		if access.Account == "global" {
-			mappingName = access.Field
-			accountID = 0
-		} else {
-			if access.Account == "addr1" {
-				accountID = addr1
-			} else {
-				accountID = addr2
-			}
-			mappingName = access.Field + "Store"
-		}
-
-		key, err := cm.GetStorageKey(contractName, mappingName, accountID)
+		key, err := processAccess(access)
 		if err != nil {
-			fmt.Printf("Warning: failed to get storage key for %s:%s: %v\n", contractName, mappingName, err)
+			fmt.Printf("Warning: failed to get storage key for %s:%s: %v\n", contractName, access.Field, err)
 			continue
 		}
-
 		wAddr = append(wAddr, key)
 		wValue = append(wValue, big.NewInt(0).Bytes())
 	}
 
 	return rAddr, rValue, wAddr, wValue
+}
+
+// fixLLMResponse 修正 LLM 响应，自动补充缺失的读取
+// 规则：如果写入集中包含某个全局变量（通过 global 关键字访问），
+// 但读取集中没有包含该变量，那么应该将该变量添加到读取集中。
+// 这是因为在条件分支（如 else 分支）中，可能需要先读取变量才能写入。
+func fixLLMResponse(contractName string, resp *LLMResponse) *LLMResponse {
+	cm := GetContractManager()
+	if cm == nil {
+		return resp
+	}
+
+	globalVarNames := cm.GetGlobalVarNames(contractName)
+	globalVarSet := make(map[string]bool)
+	for _, name := range globalVarNames {
+		globalVarSet[name] = true
+	}
+
+	readSet := make(map[string]bool)
+	for _, r := range resp.Reads {
+		readSet[r.Field] = true
+	}
+
+	var fixedReads []LLMFieldAccess
+	fixedReads = append(fixedReads, resp.Reads...)
+
+	for _, w := range resp.Writes {
+		if w.Account == "global" && globalVarSet[w.Field] {
+			if !readSet[w.Field] {
+				fixedReads = append(fixedReads, LLMFieldAccess{
+					Account: "global",
+					Field:   w.Field,
+				})
+				readSet[w.Field] = true
+				fmt.Printf("  [LLM FIX] Added missing read for global variable: %s\n", w.Field)
+			}
+		}
+	}
+
+	resp.Reads = fixedReads
+	return resp
 }
 
 func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool) ([][]*core.RWNode, map[string]*core.TransactionContext) {
@@ -472,6 +518,9 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 			return
 		}
 
+		// 修正 LLM 响应，自动补充缺失的读取
+		llmResp = fixLLMResponse(tx.ContractName, llmResp)
+
 		rAddr, rValue, wAddr, wValue := llmResponseToRWSet(tx.ContractName, llmResp, tx.Addr1, tx.Addr2)
 
 		rwNodes := core.CreateRWNode(strconv.FormatInt(int64(n), 10), uint32(n), rAddr, rValue, wAddr, wValue)
@@ -498,6 +547,19 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 			for i := range wAddr {
 				keyStr := core.ConvertByte2String(wAddr[i])
 				ctx.PreWriteSet[keyStr] = wValue[i]
+			}
+
+			for _, r := range llmResp.Reads {
+				ctx.LLMReads = append(ctx.LLMReads, core.LLMAccess{
+					Account: r.Account,
+					Field:   r.Field,
+				})
+			}
+			for _, w := range llmResp.Writes {
+				ctx.LLMWrites = append(ctx.LLMWrites, core.LLMAccess{
+					Account: w.Account,
+					Field:   w.Field,
+				})
 			}
 
 			contexts[ctx.TxID] = ctx

@@ -38,6 +38,7 @@ const dbFile5 = "DAG_Con"
 const dbFile6 = "Eth_Test"
 const dbFile7 = "DAG_Depurge"       // 为Depurge算法预留的数据库
 const dbFile8 = "DAG_NezhaVariable" // 为 Nezha_variable 算法预留的数据库
+const dbFile9 = "DAG_Vegeta"        // 为 Vegeta 算法预留的数据库
 const fileName = "Exp_results.txt"
 
 func main() {
@@ -53,6 +54,7 @@ func main() {
 	var NezhaVariable bool
 	var CG bool
 	var Depurge bool
+	var Vegeta bool
 	var benchmark bool
 	flag.Uint64Var(&addrNum, "a", 10000, "specify address number to use. defaults to 10000.")
 	flag.IntVar(&txNum, "t", 200, "specify transaction number to use. defaults to 100.")
@@ -66,6 +68,7 @@ func main() {
 	flag.BoolVar(&NezhaVariable, "NezhaVariable", false, "specify NezhaVariable mode to use. defaults to false.")
 	flag.BoolVar(&CG, "CG", false, "specify CG mode to use. defaults to false.")
 	flag.BoolVar(&Depurge, "Depurge", false, "specify Depurge mode mode to use. defaults to false.")
+	flag.BoolVar(&Vegeta, "Vegeta", false, "specify Vegeta mode to use. defaults to false.")
 	flag.BoolVar(&benchmark, "benchmark", false, "specify benchmark mode to use. defaults to false.")
 	flag.Parse()
 
@@ -154,6 +157,7 @@ func main() {
 		// TODO: 取消下面的注释来运行你的新算法测试
 		TestDepurge(txList, w, dbFile7)
 		TestNezhaVariable(txList, w, dbFile8)
+		TestVegeta(txList, w, dbFile9)
 	} else {
 		if benchmark {
 			TestSerialExecution(txList, w)
@@ -169,6 +173,9 @@ func main() {
 		if NezhaVariable {
 			TestNezhaVariable(txList, w, dbFile8)
 		}
+		if Vegeta {
+			TestVegeta(txList, w, dbFile9)
+		}
 		if CG {
 			TestConflictGraph(txList, w, dbFile2)
 		}
@@ -179,7 +186,7 @@ func main() {
 
 // CleanupDatabases 删除所有旧的数据库目录，确保每次测试从零开始
 func CleanupDatabases() {
-	dbFiles := []string{dbFile1, dbFile2, dbFile3, dbFile4, dbFile5, dbFile6, dbFile7, dbFile8}
+	dbFiles := []string{dbFile1, dbFile2, dbFile3, dbFile4, dbFile5, dbFile6, dbFile7, dbFile8, dbFile9}
 	for _, dbFile := range dbFiles {
 		if err := os.RemoveAll(dbFile); err != nil {
 			log.Printf("Warning: could not remove database %s: %v", dbFile, err)
@@ -1289,4 +1296,318 @@ func OpenDB(dbFile string) *leveldb.DB {
 	}
 
 	return db
+}
+
+// ==============================
+// Vegeta Algorithm
+// ==============================
+
+func TestVegeta(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
+
+	txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
+
+	utils.InitEVMPool(dbFile, runtime.NumCPU())
+	start := time.Now()
+
+	// Step 1: Build speculative RS/WS and txID→nodes mapping
+	txToNodes := make(map[string][]*core.RWNode)
+	speculativeRS := make(map[string]map[string]bool)
+	speculativeWS := make(map[string]map[string]bool)
+
+	for _, txNodes := range txs {
+		if len(txNodes) == 0 {
+			continue
+		}
+		txID := txNodes[0].TransInfo.ID
+		txToNodes[txID] = txNodes
+
+		rSet := make(map[string]bool)
+		wSet := make(map[string]bool)
+		for _, node := range txNodes {
+			key := core.ConvertByte2String(node.RWSet.Key)
+			if node.Label == "r" {
+				rSet[key] = true
+			} else if node.Label == "w" {
+				wSet[key] = true
+			}
+		}
+		speculativeRS[txID] = rSet
+		speculativeWS[txID] = wSet
+	}
+
+	// Step 2: Dependency chain construction
+	start1 := time.Now()
+	keyToTxs := make(map[string][]string)
+	for txID := range speculativeRS {
+		for key := range speculativeRS[txID] {
+			keyToTxs[key] = append(keyToTxs[key], txID)
+		}
+	}
+	for txID := range speculativeWS {
+		for key := range speculativeWS[txID] {
+			keyToTxs[key] = append(keyToTxs[key], txID)
+		}
+	}
+
+	var chains [][]string
+	for _, txIDs := range keyToTxs {
+		if len(txIDs) > 0 {
+			seen := make(map[string]bool)
+			var chain []string
+			for _, id := range txIDs {
+				if !seen[id] {
+					seen[id] = true
+					chain = append(chain, id)
+				}
+			}
+			chains = append(chains, chain)
+		}
+	}
+
+	sort.Slice(chains, func(i, j int) bool {
+		return len(chains[i]) > len(chains[j])
+	})
+
+	orderedTxs := make([]string, 0, len(contexts))
+	seenTxs := make(map[string]bool)
+	for _, chain := range chains {
+		for _, txID := range chain {
+			if !seenTxs[txID] && contexts[txID] != nil {
+				orderedTxs = append(orderedTxs, txID)
+				seenTxs[txID] = true
+			}
+		}
+	}
+	for txID := range contexts {
+		if !seenTxs[txID] {
+			orderedTxs = append(orderedTxs, txID)
+			seenTxs[txID] = true
+		}
+	}
+
+	duration1 := time.Since(start1)
+	writer.WriteString(fmt.Sprintf("Time of speculation (chain ordering): %s\n", duration1))
+
+	// Step 3: Build DAG
+	start2 := time.Now()
+	dag := make(map[string][]string)
+	for i, txID := range orderedTxs {
+		var predecessors []string
+		for j := 0; j < i; j++ {
+			prevTxID := orderedTxs[j]
+			hasConflict := false
+
+			for key := range speculativeWS[txID] {
+				if speculativeWS[prevTxID][key] {
+					hasConflict = true
+					break
+				}
+			}
+			if !hasConflict {
+				for key := range speculativeRS[txID] {
+					if speculativeWS[prevTxID][key] {
+						hasConflict = true
+						break
+					}
+				}
+			}
+			if !hasConflict {
+				for key := range speculativeWS[txID] {
+					if speculativeRS[prevTxID][key] {
+						hasConflict = true
+						break
+					}
+				}
+			}
+			if hasConflict {
+				predecessors = append(predecessors, prevTxID)
+			}
+		}
+		dag[txID] = predecessors
+	}
+	duration2 := time.Since(start2)
+	writer.WriteString(fmt.Sprintf("Time of DAG construction: %s\n", duration2))
+
+	// Step 4: Replay loop (DAG-based parallel validation)
+	start4 := time.Now()
+	committedState := make(map[string][]byte)
+	var stateLock sync.Mutex
+
+	executed := make(map[string]bool)
+	remaining := make(map[string]bool)
+	for _, txID := range orderedTxs {
+		remaining[txID] = true
+	}
+
+	var serialReplayList []string
+	algorithmAborted := 0
+
+	for len(remaining) > 0 {
+		var batch []string
+		for txID := range remaining {
+			ready := true
+			for _, pred := range dag[txID] {
+				if !executed[pred] {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				batch = append(batch, txID)
+			}
+		}
+
+		if len(batch) == 0 {
+			break
+		}
+
+		sort.Strings(batch)
+
+		batchResults := make(map[string]bool)
+		batchDeltas := make(map[string]map[string]*big.Int)
+		var resultsLock sync.Mutex
+		var wg sync.WaitGroup
+
+		validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
+			txID := i.(string)
+			ctx, exists := contexts[txID]
+			if !exists {
+				resultsLock.Lock()
+				batchResults[txID] = false
+				resultsLock.Unlock()
+				wg.Done()
+				return
+			}
+
+			stateLock.Lock()
+			contractState := filterContractState(committedState, ctx.ContractName)
+			stateLock.Unlock()
+
+			realReadKeys, realWriteKeys, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, contractState)
+			if err != nil {
+				resultsLock.Lock()
+				batchResults[txID] = false
+				resultsLock.Unlock()
+				wg.Done()
+				return
+			}
+
+			preRS := speculativeRS[txID]
+			preWS := speculativeWS[txID]
+
+			match := true
+			for _, key := range realReadKeys {
+				if !preRS[key] {
+					match = false
+					break
+				}
+			}
+			if match {
+				for _, key := range realWriteKeys {
+					if !preWS[key] {
+						match = false
+						break
+					}
+				}
+			}
+
+			if !match {
+				resultsLock.Lock()
+				batchResults[txID] = false
+				resultsLock.Unlock()
+				wg.Done()
+				return
+			}
+
+			stateLock.Lock()
+			updateCommittedState(committedState, ctx.ContractName, writeDelta)
+			stateLock.Unlock()
+
+			resultsLock.Lock()
+			batchResults[txID] = true
+			batchDeltas[txID] = writeDelta
+			resultsLock.Unlock()
+			wg.Done()
+		})
+
+		for _, txID := range batch {
+			wg.Add(1)
+			_ = validatePool.Invoke(txID)
+		}
+		wg.Wait()
+		validatePool.Release()
+
+		for _, txID := range batch {
+			delete(remaining, txID)
+			executed[txID] = true
+
+			if !batchResults[txID] {
+				serialReplayList = append(serialReplayList, txID)
+			}
+		}
+	}
+
+	durationValidation := time.Since(start4)
+	writer.WriteString(fmt.Sprintf("Time of replay (validation): %s\n", durationValidation))
+
+	// Step 5: Serial replay of inconsistent transactions
+	start5 := time.Now()
+	for _, txID := range serialReplayList {
+		ctx, exists := contexts[txID]
+		if !exists {
+			continue
+		}
+
+		contractState := filterContractState(committedState, ctx.ContractName)
+		_, _, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, contractState)
+		if err != nil {
+			continue
+		}
+
+		updateCommittedState(committedState, ctx.ContractName, writeDelta)
+	}
+	durationSerial := time.Since(start5)
+	writer.WriteString(fmt.Sprintf("Time of serial replay: %s\n", durationSerial))
+
+	// Commit to DB
+	db := OpenDB(dbFile)
+	startCommit := time.Now()
+
+	var wg sync.WaitGroup
+	p, _ := ants.NewPoolWithFunc(2000, func(i interface{}) {
+		n := i.([]*core.RWNode)
+		for _, rw := range n {
+			keyStr := core.ConvertByte2String(rw.RWSet.Key)
+			if finalVal, ok := committedState[keyStr]; ok {
+				acc := core.CreateAccount(rw.RWSet.Key, finalVal)
+				err := utils.StoreState(db, acc)
+				if err != nil {
+					log.Panic(err)
+				}
+			}
+		}
+		wg.Done()
+	})
+	defer p.Release()
+
+	for _, txID := range orderedTxs {
+		if nodes, ok := txToNodes[txID]; ok {
+			wg.Add(1)
+			_ = p.Invoke(nodes)
+		}
+	}
+	wg.Wait()
+
+	durationCommit := time.Since(startCommit)
+	writer.WriteString(fmt.Sprintf("Time of committing transactions: %s\n", durationCommit))
+
+	duration := time.Since(start)
+
+	writer.WriteString(fmt.Sprintf("Algorithm aborted: %d, Serial replayed: %d\n",
+		algorithmAborted, len(serialReplayList)))
+	writer.WriteString(fmt.Sprintf("Time of processing TXs on Vegeta: %s\n", duration))
+	writer.WriteString(fmt.Sprintf("===================================================\n"))
+	writer.Flush()
+
+	utils.CloseEVMPool()
 }

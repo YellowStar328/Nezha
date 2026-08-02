@@ -3,7 +3,7 @@
   "writes": [
     {
       "account": "addr1",
-      "field": "balancesStore"
+      "field": "balances"
     }
   ]
 }

@@ -1,8 +1,8 @@
 pragma solidity >=0.4.0 <0.7.0;
 
 contract USDT {
-    mapping(string => uint256) public balancesStore;
-    mapping(string => bool) public isBlackListedStore; // 黑名单列表
+    mapping(string => uint256) public balances;
+    mapping(string => bool) public isBlackListed; // 黑名单列表
 
     uint256 public feeRate; // 简化为百分比或基点，0表示无手续费
 

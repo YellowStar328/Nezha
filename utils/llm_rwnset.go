@@ -157,9 +157,9 @@ func buildLLMPrompt(contractName, functionName string) string {
 4. account可以是：addr1、addr2（函数参数）、global（直接访问全局变量）、或某个全局变量名（用该变量的值作为键）
 5. 保守规则：对于if/else等条件语句，必须包含两个分支中所有可能的存储访问。例如，如果else分支中使用了pool2，则必须包含对pool2的读取和写入（如果有）
 6. 对于mapping访问，即使条件分支可能不执行，也要保守地包含所有可能的mapping访问
-
+7. 全局变量读写一致性：任何出现在writes中的全局变量（account为"global"的字段），必须同时出现在reads中。因为写入状态变量通常需要先读取其当前值（如x = x + 1），所以必须同时记录该变量的读取
 返回示例：
-{"reads":[{"account":"addr1","field":"userBalances"},{"account":"global","field":"pool1"},{"account":"global","field":"pool2"},{"account":"pool1","field":"poolLiquidity"},{"account":"pool2","field":"poolLiquidity"}],"writes":[{"account":"addr1","field":"userBalances"},{"account":"pool1","field":"poolLiquidity"},{"account":"pool2","field":"poolLiquidity"}]}`, contractName, functionName, sourceCode, argMappingStr, fieldOptions, globalVars)
+{"reads":[{"account":"addr1","field":"userBalances"},{"account":"global","field":"pool1"},{"account":"global","field":"pool2"},{"account":"global","field":"totalSupply"},{"account":"pool1","field":"poolLiquidity"},{"account":"pool2","field":"poolLiquidity"}],"writes":[{"account":"addr1","field":"userBalances"},{"account":"global","field":"totalSupply"},{"account":"pool1","field":"poolLiquidity"},{"account":"pool2","field":"poolLiquidity"}]}`, contractName, functionName, sourceCode, argMappingStr, fieldOptions, globalVars)
 
 	return prompt
 }
@@ -518,8 +518,8 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 			return
 		}
 
-		// 修正 LLM 响应，自动补充缺失的读取
-		llmResp = fixLLMResponse(tx.ContractName, llmResp)
+		// // 修正 LLM 响应，自动补充缺失的读取
+		// llmResp = fixLLMResponse(tx.ContractName, llmResp)
 
 		rAddr, rValue, wAddr, wValue := llmResponseToRWSet(tx.ContractName, llmResp, tx.Addr1, tx.Addr2)
 

@@ -1,8 +1,16 @@
 {
   "reads": [
     {
+      "account": "addr1",
+      "field": "poolLiquidity"
+    },
+    {
       "account": "global",
       "field": "pool3"
+    },
+    {
+      "account": "global",
+      "field": "pool4"
     }
   ],
   "writes": [

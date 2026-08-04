@@ -49,9 +49,7 @@ func CreateVariableGraph(rwNodes [][]*RWNode) *NezhaVariableData {
 		edges[id] = edge
 
 		for _, n := range rw {
-			key := n.RWSet.Key
-			newKey := ConvertByte2String(key)
-			queueArray[newKey] = append(queueArray[newKey], n)
+			queueArray[n.CompositeKey()] = append(queueArray[n.CompositeKey()], n)
 		}
 	}
 
@@ -102,14 +100,11 @@ func (nv *NezhaVariableData) QueuesSort() []string {
 		temp := map[string]struct{}{}
 
 		for _, w := range nv.Queues[key].wSlice {
-			rwKey := w.RWSet.Key
 			id := w.TransInfo.ID
 
 			for _, n := range nv.Edges[id].set {
-				rwKey2 := n.RWSet.Key
-				if reflect.DeepEqual(n.Label, "r") && !reflect.DeepEqual(rwKey, rwKey2) {
-					newKey := ConvertByte2String(rwKey2)
-					temp[newKey] = struct{}{}
+				if n.Label == "r" && n.CompositeKey() != w.CompositeKey() {
+					temp[n.CompositeKey()] = struct{}{}
 				}
 			}
 		}
@@ -239,7 +234,7 @@ func (nv *NezhaVariableData) sortInQueue(queue *VariableQueue) {
 
 				for _, rw := range edge {
 					if rw.Label == "r" && rw.isAssigned {
-						if reflect.DeepEqual(w.RWSet.Key, rw.RWSet.Key) {
+						if w.CompositeKey() == rw.CompositeKey() {
 							isSame = true
 							break
 						} else {

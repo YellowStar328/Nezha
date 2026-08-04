@@ -7,22 +7,22 @@ import (
 )
 
 type ArcNode struct {
-	adj  int
-	next *ArcNode
+	adj       int
+	next      *ArcNode
 	isAborted bool
 }
 
 type VNode struct {
-	data  int
-	first *ArcNode
+	data     int
+	first    *ArcNode
 	isSorted bool
 }
 
 type AlGraph struct {
 	vertices       []*VNode
 	vexNum, arcNum int
-	outDegree 	   []int
-	inDegree 	   []int
+	outDegree      []int
+	inDegree       []int
 }
 
 func (al *AlGraph) Init(gSlice [][]int) {
@@ -61,7 +61,7 @@ func (al *AlGraph) Init(gSlice [][]int) {
 		}
 	}
 
-	for i:=0; i<al.vexNum; i++ {
+	for i := 0; i < al.vexNum; i++ {
 		al.inDegree = append(al.inDegree, inDegree[i])
 	}
 }
@@ -289,12 +289,12 @@ func (al *AlGraph) GetAllCycles(conn []int) map[int][]int {
 		flag := 0
 		length := end - start
 
-		for i:=0; i<pathNum; i++ {
+		for i := 0; i < pathNum; i++ {
 			if len(cycles[i]) == length {
 				flag = 0
-				for j:=start; j<end; j++ {
+				for j := start; j < end; j++ {
 					e := path[j]
-					for k:=0; k<len(cycles[i]); k++ {
+					for k := 0; k < len(cycles[i]); k++ {
 						if cycles[i][k] == e {
 							flag++
 						}
@@ -327,13 +327,13 @@ func (al *AlGraph) GetAllCycles(conn []int) map[int][]int {
 			}
 
 			if visit[ver.adj] == 1 {
-				for i:=0; i<k; i++ {
+				for i := 0; i < k; i++ {
 					if path[i] == ver.adj {
 						start = i
 					}
 				}
 				if existCycle(start, k+1) {
-					for i:=start; i<=k; i++ {
+					for i := start; i <= k; i++ {
 						cycles[pathNum] = append(cycles[pathNum], path[i])
 					}
 					pathNum++
@@ -365,26 +365,24 @@ func BuildConflictGraph(txs [][]*RWNode) [][]int {
 	var gSlice = make([][]int, len(txs))
 
 	for i, v := range txs {
-		var rKeys [][]byte
-		var wKeys [][]byte
+		var rKeys []string
+		var wKeys []string
 
 		for _, rw := range v {
 			if rw.Label == "r" {
-				rKeys = append(rKeys, rw.RWSet.Key)
+				rKeys = append(rKeys, rw.CompositeKey())
 			} else {
-				wKeys = append(wKeys, rw.RWSet.Key)
+				wKeys = append(wKeys, rw.CompositeKey())
 			}
 		}
 
-		for j:=i+1; j<len(txs); j++ {
+		for j := i + 1; j < len(txs); j++ {
 			for _, rw := range txs[j] {
-				if rw.Label == "w" && isExistForByte(rKeys, rw.RWSet.Key) {
-					// build r-w dependency
+				if rw.Label == "w" && isExistForString(rKeys, rw.CompositeKey()) {
 					if !isExistForInt(gSlice[i], j) {
 						gSlice[i] = append(gSlice[i], j)
 					}
-				} else if rw.Label == "w" && isExistForByte(wKeys, rw.RWSet.Key) {
-					// build w-w dependency
+				} else if rw.Label == "w" && isExistForString(wKeys, rw.CompositeKey()) {
 					if !isExistForInt(gSlice[i], j) {
 						gSlice[i] = append(gSlice[i], j)
 					}
@@ -392,10 +390,9 @@ func BuildConflictGraph(txs [][]*RWNode) [][]int {
 			}
 		}
 
-		for k:=i-1; k>=0; k-- {
+		for k := i - 1; k >= 0; k-- {
 			for _, rw := range txs[k] {
-				if rw.Label == "w" && isExistForByte(rKeys, rw.RWSet.Key) {
-					// build r-w dependency
+				if rw.Label == "w" && isExistForString(rKeys, rw.CompositeKey()) {
 					if !isExistForInt(gSlice[i], k) {
 						gSlice[i] = append(gSlice[i], k)
 					}
@@ -419,22 +416,21 @@ func NewBuildConflictGraph(txs [][]*RWNode) [][]int {
 
 		for _, rw := range v {
 			if rw.Label == "r" {
-				rKey := ConvertByte2String(rw.RWSet.Key)
+				rKey := rw.CompositeKey()
 				rKeys = append(rKeys, rKey)
 				rSet[rKey] = append(rSet[rKey], i)
 			} else {
-				wKey := ConvertByte2String(rw.RWSet.Key)
+				wKey := rw.CompositeKey()
 				wKeys = append(wKeys, wKey)
 				wSet[wKey] = append(wSet[wKey], i)
 			}
 		}
 
-		for j:=i+1; j<len(txs); j++ {
+		for j := i + 1; j < len(txs); j++ {
 			for _, rw := range txs[j] {
 				if rw.Label == "w" {
-					rwKey := ConvertByte2String(rw.RWSet.Key)
+					rwKey := rw.CompositeKey()
 					if isExistForString(wKeys, rwKey) {
-						// build w-w dependency
 						gSlice[i] = append(gSlice[i], j)
 					}
 				}
@@ -445,9 +441,8 @@ func NewBuildConflictGraph(txs [][]*RWNode) [][]int {
 	for i, v := range txs {
 		for _, rw := range v {
 			if rw.Label == "r" {
-				rwKey := ConvertByte2String(rw.RWSet.Key)
+				rwKey := rw.CompositeKey()
 				for _, v := range wSet[rwKey] {
-					// build r-w dependency
 					if v != i && !isExistForInt(gSlice[i], v) {
 						gSlice[i] = append(gSlice[i], v)
 					}

@@ -4,11 +4,13 @@ import (
 	"Nezha/ethereum/go-ethereum/accounts/abi"
 	"Nezha/ethereum/go-ethereum/common"
 	"Nezha/evm/levm/tools"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"math/rand"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"golang.org/x/crypto/sha3"
@@ -54,6 +56,70 @@ func InitContractManager(configPath string) error {
 	return nil
 }
 
+// solcStorageItem represents a single storage slot entry from solc --storage-layout output.
+type solcStorageItem struct {
+	Label  string `json:"label"`
+	Slot   string `json:"slot"`
+	Offset int    `json:"offset"`
+	Type   string `json:"type"`
+}
+
+// solcStorageType describes a type in the storage layout.
+type solcStorageType struct {
+	Encoding string `json:"encoding"`
+	Label    string `json:"label"`
+	Key      string `json:"key,omitempty"`
+	Value    string `json:"value,omitempty"`
+}
+
+// solcStorageLayout is the top-level structure of a .storage.json file.
+type solcStorageLayout struct {
+	Storage []solcStorageItem          `json:"storage"`
+	Types   map[string]solcStorageType `json:"types"`
+}
+
+// parseSolcStorageLayout reads a solc-generated .storage.json file and converts it
+// to the internal StorageMapping format. This replaces manual yaml declarations.
+func parseSolcStorageLayout(path string) ([]StorageMapping, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read storage layout %s: %w", path, err)
+	}
+
+	var layout solcStorageLayout
+	if err := json.Unmarshal(data, &layout); err != nil {
+		return nil, fmt.Errorf("failed to parse storage layout %s: %w", path, err)
+	}
+
+	var result []StorageMapping
+	for _, item := range layout.Storage {
+		slot, err := strconv.ParseUint(item.Slot, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid slot %q for %s: %w", item.Slot, item.Label, err)
+		}
+
+		keyType := "simple"
+		if typeInfo, ok := layout.Types[item.Type]; ok {
+			if typeInfo.Encoding == "mapping" {
+				// Determine key type from the mapping's key type ID
+				if strings.Contains(typeInfo.Key, "string") {
+					keyType = "string"
+				} else {
+					keyType = "uint"
+				}
+			}
+		}
+
+		result = append(result, StorageMapping{
+			MappingName: item.Label,
+			Slot:        slot,
+			KeyType:     keyType,
+		})
+	}
+
+	return result, nil
+}
+
 func (cm *ContractManager) loadContract(contract ContractConfig) {
 	abiObject, _, err := tools.LoadContract(contract.ABIPath, contract.BinPath)
 	if err != nil {
@@ -68,6 +134,23 @@ func (cm *ContractManager) loadContract(contract ContractConfig) {
 		return
 	}
 	cm.sourceCode[contract.Name] = string(sourceCode)
+
+	// Load storage layout from solc-generated JSON if available;
+	// otherwise fall back to yaml-declared storage_layout.
+	if contract.StorageLayoutPath != "" {
+		layout, err := parseSolcStorageLayout(contract.StorageLayoutPath)
+		if err != nil {
+			fmt.Printf("Warning: failed to load storage layout for %s: %v\n", contract.Name, err)
+		} else {
+			// Mutate the config in place so downstream callers see the parsed layout.
+			for i := range cm.config.Contracts {
+				if cm.config.Contracts[i].Name == contract.Name {
+					cm.config.Contracts[i].StorageLayout = layout
+					break
+				}
+			}
+		}
+	}
 }
 
 func GetContractManager() *ContractManager {

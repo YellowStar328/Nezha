@@ -5,12 +5,20 @@
       "field": "userBalances"
     },
     {
+      "account": "addr2",
+      "field": "userBalances"
+    },
+    {
       "account": "global",
       "field": "pool3"
     },
     {
       "account": "global",
       "field": "pool4"
+    },
+    {
+      "account": "global",
+      "field": "usdt"
     },
     {
       "account": "pool3",
@@ -27,12 +35,22 @@
       "field": "userBalances"
     },
     {
+      "account": "addr2",
+      "field": "userBalances"
+    },
+    {
       "account": "pool3",
       "field": "poolLiquidity"
     },
     {
       "account": "pool4",
       "field": "poolLiquidity"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "USDT",
+      "function": "transfer"
     }
   ]
 }

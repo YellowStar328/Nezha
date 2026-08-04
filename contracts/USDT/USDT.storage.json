@@ -1,0 +1,59 @@
+{
+  "storage": [
+    {
+      "astId": 5,
+      "contract": "/sources/usdt.sol:USDT",
+      "label": "balances",
+      "offset": 0,
+      "slot": "0",
+      "type": "t_mapping(t_string_memory_ptr,t_uint256)"
+    },
+    {
+      "astId": 9,
+      "contract": "/sources/usdt.sol:USDT",
+      "label": "isBlackListed",
+      "offset": 0,
+      "slot": "1",
+      "type": "t_mapping(t_string_memory_ptr,t_bool)"
+    },
+    {
+      "astId": 11,
+      "contract": "/sources/usdt.sol:USDT",
+      "label": "feeRate",
+      "offset": 0,
+      "slot": "2",
+      "type": "t_uint256"
+    }
+  ],
+  "types": {
+    "t_bool": {
+      "encoding": "inplace",
+      "label": "bool",
+      "numberOfBytes": "1"
+    },
+    "t_mapping(t_string_memory_ptr,t_bool)": {
+      "encoding": "mapping",
+      "key": "t_string_memory_ptr",
+      "label": "mapping(string => bool)",
+      "numberOfBytes": "32",
+      "value": "t_bool"
+    },
+    "t_mapping(t_string_memory_ptr,t_uint256)": {
+      "encoding": "mapping",
+      "key": "t_string_memory_ptr",
+      "label": "mapping(string => uint256)",
+      "numberOfBytes": "32",
+      "value": "t_uint256"
+    },
+    "t_string_memory_ptr": {
+      "encoding": "bytes",
+      "label": "string",
+      "numberOfBytes": "32"
+    },
+    "t_uint256": {
+      "encoding": "inplace",
+      "label": "uint256",
+      "numberOfBytes": "32"
+    }
+  }
+}

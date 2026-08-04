@@ -42,6 +42,31 @@ echo "输出目录: $contract_dir"
 
 docker run --rm -v "$(pwd):/sources" ethereum/solc:"$SOLC_VERSION" --optimize --abi --bin "/sources/$source_name" -o /sources --overwrite
 
+# 生成 storage layout JSON
+docker run --rm -v "$(pwd):/sources" ethereum/solc:"$SOLC_VERSION" --optimize --combined-json storage-layout "/sources/$source_name" > .storage_combined.json 2>/dev/null
+
+# 从 combined JSON 中提取每个合约的 storage layout，保存为 <ContractName>.storage.json
+python3 -c "
+import json, sys, os
+with open('.storage_combined.json') as f:
+    data = json.load(f)
+for full_name, contract_data in data.get('contracts', {}).items():
+    contract_name = full_name.split(':')[-1]
+    sl = contract_data.get('storage-layout')
+    if sl is None:
+        continue
+    # storage-layout 是字符串化的 JSON，解析后再保存
+    parsed = json.loads(sl) if isinstance(sl, str) else sl
+    if not parsed.get('storage'):
+        continue  # 跳过 interface（空 storage）
+    out_file = f'{contract_name}.storage.json'
+    with open(out_file, 'w') as out:
+        json.dump(parsed, out, indent=2)
+    print(f'✓ 生成: {out_file}')
+" 2>/dev/null
+
+rm -f .storage_combined.json
+
 for file in *.abi *.bin; do
     if [[ -f "$file" ]]; then
         exists=0

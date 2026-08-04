@@ -30,9 +30,15 @@ type LLMFieldAccess struct {
 	Field   string `json:"field"`
 }
 
+type CrossContractCall struct {
+	Contract string `json:"contract"`
+	Function string `json:"function"`
+}
+
 type LLMResponse struct {
-	Reads  []LLMFieldAccess `json:"reads"`
-	Writes []LLMFieldAccess `json:"writes"`
+	Reads      []LLMFieldAccess    `json:"reads"`
+	Writes     []LLMFieldAccess    `json:"writes"`
+	CrossCalls []CrossContractCall `json:"crossCalls,omitempty"`
 }
 
 type LLMConfig struct {
@@ -136,6 +142,19 @@ func buildLLMPrompt(contractName, functionName string) string {
 		}
 	}
 
+	availableContracts := ""
+	allContracts := cm.GetAllContracts()
+	for _, c := range allContracts {
+		funcNames := ""
+		for i, f := range c.Functions {
+			if i > 0 {
+				funcNames += ", "
+			}
+			funcNames += f.Name
+		}
+		availableContracts += fmt.Sprintf("- %s: %s\n", c.Name, funcNames)
+	}
+
 	prompt := fmt.Sprintf(`分析以下 %s 合约中函数 "%s" 的保守读写集。直接返回JSON格式，不要任何分析文字。
 
 合约代码：
@@ -150,6 +169,9 @@ func buildLLMPrompt(contractName, functionName string) string {
 全局变量列表（key_type为simple的字段）：
 %s
 
+可用合约与函数列表（用于识别跨合约调用）：
+%s
+
 重要规则：
 1. 直接访问全局变量（如读取pool1的值）：{"account": "global", "field": "pool1"}
 2. 用全局变量的值作为键访问mapping（如poolLiquidity[pool1]）：{"account": "pool1", "field": "poolLiquidity"}
@@ -158,8 +180,10 @@ func buildLLMPrompt(contractName, functionName string) string {
 5. 保守规则：对于if/else等条件语句，必须包含两个分支中所有可能的存储访问。例如，如果else分支中使用了pool2，则必须包含对pool2的读取和写入（如果有）
 6. 对于mapping访问，即使条件分支可能不执行，也要保守地包含所有可能的mapping访问
 7. 全局变量读写一致性：任何出现在writes中的全局变量（account为"global"的字段），必须同时出现在reads中。因为写入状态变量通常需要先读取其当前值（如x = x + 1），所以必须同时记录该变量的读取
+8. 跨合约调用：如果合约代码中调用了上述"可用合约与函数列表"中的其他合约函数（如调用 USDT 合约的 transfer 函数），必须在 crossCalls 数组中列出。每个 crossCall 包含 contract（合约名）和 function（函数名）
+
 返回示例：
-{"reads":[{"account":"addr1","field":"userBalances"},{"account":"global","field":"pool1"},{"account":"global","field":"pool2"},{"account":"global","field":"totalSupply"},{"account":"pool1","field":"poolLiquidity"},{"account":"pool2","field":"poolLiquidity"}],"writes":[{"account":"addr1","field":"userBalances"},{"account":"global","field":"totalSupply"},{"account":"pool1","field":"poolLiquidity"},{"account":"pool2","field":"poolLiquidity"}]}`, contractName, functionName, sourceCode, argMappingStr, fieldOptions, globalVars)
+{"reads":[{"account":"addr1","field":"userBalances"},{"account":"global","field":"pool1"},{"account":"global","field":"pool2"},{"account":"global","field":"totalSupply"},{"account":"pool1","field":"poolLiquidity"},{"account":"pool2","field":"poolLiquidity"}],"writes":[{"account":"addr1","field":"userBalances"},{"account":"global","field":"totalSupply"},{"account":"pool1","field":"poolLiquidity"},{"account":"pool2","field":"poolLiquidity"}],"crossCalls":[{"contract":"USDT","function":"transfer"}]}`, contractName, functionName, sourceCode, argMappingStr, fieldOptions, globalVars, availableContracts)
 
 	return prompt
 }
@@ -389,45 +413,43 @@ func llmResponseToRWSet(contractName string, resp *LLMResponse, addr1, addr2 uin
 	return rAddr, rValue, wAddr, wValue
 }
 
-// fixLLMResponse 修正 LLM 响应，自动补充缺失的读取
-// 规则：如果写入集中包含某个全局变量（通过 global 关键字访问），
-// 但读取集中没有包含该变量，那么应该将该变量添加到读取集中。
-// 这是因为在条件分支（如 else 分支）中，可能需要先读取变量才能写入。
-func fixLLMResponse(contractName string, resp *LLMResponse) *LLMResponse {
-	cm := GetContractManager()
-	if cm == nil {
-		return resp
+var ErrCrossContractNotCached = fmt.Errorf("cross-contract call not found in LLM cache")
+
+// mergeCrossContractRWSet checks cross-contract calls in the LLM response and merges
+// cached RW sets from those contracts. Returns extra raw keys to append to the main RW set.
+// If any cross-contract call is not cached, returns ErrCrossContractNotCached with details.
+func mergeCrossContractRWSet(
+	resp *LLMResponse,
+	addr1, addr2 uint64,
+) (extraRAddr, extraRValue, extraWAddr, extraWValue [][]byte, err error) {
+	if len(resp.CrossCalls) == 0 {
+		return nil, nil, nil, nil, nil
 	}
 
-	globalVarNames := cm.GetGlobalVarNames(contractName)
-	globalVarSet := make(map[string]bool)
-	for _, name := range globalVarNames {
-		globalVarSet[name] = true
-	}
+	for _, cc := range resp.CrossCalls {
+		cacheKey := fmt.Sprintf("%s:%s", cc.Contract, cc.Function)
 
-	readSet := make(map[string]bool)
-	for _, r := range resp.Reads {
-		readSet[r.Field] = true
-	}
-
-	var fixedReads []LLMFieldAccess
-	fixedReads = append(fixedReads, resp.Reads...)
-
-	for _, w := range resp.Writes {
-		if w.Account == "global" && globalVarSet[w.Field] {
-			if !readSet[w.Field] {
-				fixedReads = append(fixedReads, LLMFieldAccess{
-					Account: "global",
-					Field:   w.Field,
-				})
-				readSet[w.Field] = true
-				fmt.Printf("  [LLM FIX] Added missing read for global variable: %s\n", w.Field)
-			}
+		var subResp *LLMResponse
+		if cached, ok := llmCache.Load(cacheKey); ok {
+			subResp = cached.(*LLMResponse)
+		} else if loaded, loadErr := loadLLMCacheFromFile(cc.Contract, cc.Function); loadErr == nil {
+			llmCache.Store(cacheKey, loaded)
+			subResp = loaded
+		} else {
+			return nil, nil, nil, nil, fmt.Errorf(
+				"%w: %s.%s", ErrCrossContractNotCached, cc.Contract, cc.Function)
 		}
+
+		subR, subRV, subW, subWV := llmResponseToRWSet(cc.Contract, subResp, addr1, addr2)
+		extraRAddr = append(extraRAddr, subR...)
+		extraRValue = append(extraRValue, subRV...)
+		extraWAddr = append(extraWAddr, subW...)
+		extraWValue = append(extraWValue, subWV...)
+		fmt.Printf("  [LLM CROSS] Merged %s.%s: %d reads, %d writes\n",
+			cc.Contract, cc.Function, len(subR), len(subW))
 	}
 
-	resp.Reads = fixedReads
-	return resp
+	return extraRAddr, extraRValue, extraWAddr, extraWValue, nil
 }
 
 func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool) ([][]*core.RWNode, map[string]*core.TransactionContext) {
@@ -456,33 +478,14 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 			lvm.NewAccount(fromAddr, big.NewInt(1e18))
 			defer lvm.Close()
 
-			cm := GetContractManager()
-			if cm == nil {
-				fmt.Println("ContractManager not initialized")
-				wg.Done()
-				return
-			}
-
-			contractConfig, ok := cm.GetContractConfig(tx.ContractName)
+			contractAddrs, abis := DeployAllContracts(lvm, fromAddr)
+			addr, ok := contractAddrs[tx.ContractName]
 			if !ok {
-				fmt.Printf("Contract %s not found\n", tx.ContractName)
+				fmt.Printf("Contract %s not deployed\n", tx.ContractName)
 				wg.Done()
 				return
 			}
-
-			abiObject, binData, loadErr := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
-			if loadErr != nil {
-				fmt.Println(loadErr)
-				wg.Done()
-				return
-			}
-
-			_, addr, _, deployErr := lvm.DeployContract(fromAddr, binData)
-			if deployErr != nil {
-				fmt.Println(deployErr)
-				wg.Done()
-				return
-			}
+			abiObject := abis[tx.ContractName]
 
 			rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, tx.ContractName, tx.Function, tx.Addr1, tx.Addr2)
 
@@ -496,7 +499,7 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 				wValue = append(wValue, wMap[key].Bytes())
 			}
 
-			rwNodes := core.CreateRWNode(strconv.FormatInt(int64(n), 10), uint32(n), rAddr, rValue, wAddr, wValue)
+			rwNodes := core.CreateRWNode(strconv.FormatInt(int64(n), 10), uint32(n), tx.ContractName, rAddr, rValue, wAddr, wValue)
 
 			lock.Lock()
 			txs = append(txs, rwNodes)
@@ -518,12 +521,66 @@ func LLMCaptureRWSet(txList []Transaction, dbFile string, captureContext ...bool
 			return
 		}
 
-		// // 修正 LLM 响应，自动补充缺失的读取
-		// llmResp = fixLLMResponse(tx.ContractName, llmResp)
+		extraR, extraRV, extraW, extraWV, crossErr := mergeCrossContractRWSet(llmResp, tx.Addr1, tx.Addr2)
+		if crossErr != nil {
+			fmt.Printf("Cross-contract RWSet not cached (%v), falling back to EVM for tx %d\n", crossErr, n)
+
+			fromAddr := tools.NewRandomAddress()
+			lvm := levm.New(dbFile, big.NewInt(0), fromAddr)
+			lvm.NewAccount(fromAddr, big.NewInt(1e18))
+			defer lvm.Close()
+
+			contractAddrs, abis := DeployAllContracts(lvm, fromAddr)
+			addr, ok := contractAddrs[tx.ContractName]
+			if !ok {
+				fmt.Printf("Contract %s not deployed\n", tx.ContractName)
+				wg.Done()
+				return
+			}
+			abiObject := abis[tx.ContractName]
+
+			rMap, wMap := SelectFunctions2(lvm, fromAddr, addr, abiObject, tx.ContractName, tx.Function, tx.Addr1, tx.Addr2)
+
+			var rAddr, rValue, wAddr, wValue [][]byte
+			for key := range rMap {
+				rAddr = append(rAddr, key.Bytes())
+				rValue = append(rValue, rMap[key].Bytes())
+			}
+			for key := range wMap {
+				wAddr = append(wAddr, key.Bytes())
+				wValue = append(wValue, wMap[key].Bytes())
+			}
+
+			rwNodes := core.CreateRWNode(strconv.FormatInt(int64(n), 10), uint32(n), tx.ContractName, rAddr, rValue, wAddr, wValue)
+
+			lock.Lock()
+			txs = append(txs, rwNodes)
+			if shouldCapture {
+				ctx := core.RWNodesToContext(
+					strconv.FormatInt(int64(n), 10),
+					tx.ContractName,
+					tx.Function,
+					tx.Addr1,
+					tx.Addr2,
+					rwNodes,
+					fromAddr,
+					addr,
+				)
+				contexts[ctx.TxID] = ctx
+			}
+			lock.Unlock()
+			wg.Done()
+			return
+		}
 
 		rAddr, rValue, wAddr, wValue := llmResponseToRWSet(tx.ContractName, llmResp, tx.Addr1, tx.Addr2)
 
-		rwNodes := core.CreateRWNode(strconv.FormatInt(int64(n), 10), uint32(n), rAddr, rValue, wAddr, wValue)
+		rAddr = append(rAddr, extraR...)
+		rValue = append(rValue, extraRV...)
+		wAddr = append(wAddr, extraW...)
+		wValue = append(wValue, extraWV...)
+
+		rwNodes := core.CreateRWNode(strconv.FormatInt(int64(n), 10), uint32(n), tx.ContractName, rAddr, rValue, wAddr, wValue)
 
 		lock.Lock()
 		txs = append(txs, rwNodes)

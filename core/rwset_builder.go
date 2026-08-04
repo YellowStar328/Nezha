@@ -9,11 +9,12 @@ import (
 )
 
 type RWNode struct {
-	RWSet      RWSet
-	TransInfo  TransInfo
-	Label      string
-	Sequence   int32
-	isAssigned bool
+	RWSet        RWSet
+	TransInfo    TransInfo
+	Label        string
+	Sequence     int32
+	isAssigned   bool
+	ContractName string
 }
 
 type TransInfo struct {
@@ -26,25 +27,29 @@ type RWSet struct {
 	Value []byte
 }
 
-func CreateRWNode(id string, time uint32, rAddr [][]byte, rValue [][]byte, wAddr [][]byte, wValue [][]byte) []*RWNode {
+func CreateRWNode(id string, time uint32, contractName string, rAddr [][]byte, rValue [][]byte, wAddr [][]byte, wValue [][]byte) []*RWNode {
 	var rwNodes []*RWNode
-	// transInfo := TransInfo{ConvertByte2String(transaction.ID), transaction.Header.Timestamp}
 	transInfo := TransInfo{id, time}
 
-	// TODO: obtain read&write set of transaction
 	for i := 0; i < len(rAddr); i++ {
 		rSet := RWSet{rAddr[i], rValue[i]}
-		rNode := RWNode{rSet, transInfo, "r", 0, false}
+		rNode := RWNode{rSet, transInfo, "r", 0, false, contractName}
 		rwNodes = append(rwNodes, &rNode)
 	}
 
 	for j := 0; j < len(wAddr); j++ {
 		wSet := RWSet{wAddr[j], wValue[j]}
-		wNode := RWNode{wSet, transInfo, "w", 0, false}
+		wNode := RWNode{wSet, transInfo, "w", 0, false, contractName}
 		rwNodes = append(rwNodes, &wNode)
 	}
 
 	return rwNodes
+}
+
+// CompositeKey returns a composite key for conflict detection that includes contract name.
+// This prevents false conflicts when different contracts happen to have the same storage key.
+func (rw *RWNode) CompositeKey() string {
+	return rw.ContractName + ":" + ConvertByte2String(rw.RWSet.Key)
 }
 
 func (rw *RWNode) assignSequence(edge []*RWNode) {
@@ -80,8 +85,8 @@ type TransactionContext struct {
 	PreWriteDelta map[string]*big.Int // key -> delta (write - read)
 	FromAddr      common.Address
 	ContractAddr  common.Address
-	LLMReads      []LLMAccess         // LLM 原始的读访问描述
-	LLMWrites     []LLMAccess         // LLM 原始的写访问描述
+	LLMReads      []LLMAccess // LLM 原始的读访问描述
+	LLMWrites     []LLMAccess // LLM 原始的写访问描述
 }
 
 // RWNodesToContext 辅助函数：将 []*RWNode 转换为 TransactionContext

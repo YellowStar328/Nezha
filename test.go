@@ -219,8 +219,6 @@ func CleanupDatabases() {
 func TestSimulation(txList []utils.Transaction, writer *bufio.Writer) {
 	txNum := len(txList)
 
-	cm := utils.GetContractManager()
-
 	type evmInstanceInfo struct {
 		lvm           *levm.LEVM
 		fromAddr      common.Address
@@ -234,31 +232,7 @@ func TestSimulation(txList []utils.Transaction, writer *bufio.Writer) {
 		lvm := levm.New(dbFile4, big.NewInt(0), fromAddr)
 		lvm.NewAccount(fromAddr, big.NewInt(1e18))
 
-		contractAddrs := make(map[string]common.Address)
-		abis := make(map[string]abi.ABI)
-
-		if cm != nil {
-			for _, contractConfig := range cm.GetAllContracts() {
-				abiObject, binData, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
-				if err != nil {
-					fmt.Printf("Warning: failed to load contract %s: %v\n", contractConfig.Name, err)
-					continue
-				}
-				_, addr, _, err := lvm.DeployContract(fromAddr, binData)
-				if err != nil {
-					fmt.Printf("Warning: failed to deploy contract %s: %v\n", contractConfig.Name, err)
-					continue
-				}
-				contractAddrs[contractConfig.Name] = addr
-				abis[contractConfig.Name] = abiObject
-			}
-		} else {
-			abiObject, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-				"./SmallBank/small_bank_sol_SmallBank.bin")
-			_, addr, _, _ := lvm.DeployContract(fromAddr, binData)
-			contractAddrs["SmallBank"] = addr
-			abis["SmallBank"] = abiObject
-		}
+		contractAddrs, abis := utils.DeployAllContracts(lvm, fromAddr)
 
 		evmInstances = append(evmInstances, evmInstanceInfo{
 			lvm:           lvm,
@@ -453,32 +427,7 @@ func TestSerialExecution(txList []utils.Transaction, writer *bufio.Writer) {
 
 	lvm.NewAccount(fromAddr, big.NewInt(1e18))
 
-	cm := utils.GetContractManager()
-	contractAddrs := make(map[string]common.Address)
-	abis := make(map[string]abi.ABI)
-
-	if cm != nil {
-		for _, contractConfig := range cm.GetAllContracts() {
-			abiObject, binData, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
-			if err != nil {
-				fmt.Printf("Warning: failed to load contract %s: %v\n", contractConfig.Name, err)
-				continue
-			}
-			_, addr, _, err := lvm.DeployContract(fromAddr, binData)
-			if err != nil {
-				fmt.Printf("Warning: failed to deploy contract %s: %v\n", contractConfig.Name, err)
-				continue
-			}
-			contractAddrs[contractConfig.Name] = addr
-			abis[contractConfig.Name] = abiObject
-		}
-	} else {
-		abiObject, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-			"./SmallBank/small_bank_sol_SmallBank.bin")
-		_, addr, _, _ := lvm.DeployContract(fromAddr, binData)
-		contractAddrs["SmallBank"] = addr
-		abis["SmallBank"] = abiObject
-	}
+	contractAddrs, abis := utils.DeployAllContracts(lvm, fromAddr)
 
 	start := time.Now()
 
@@ -1027,11 +976,10 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 
 // TestNezhaVariable test Nezha_variable algorithm for variable read/write sets and finer-grained scheduling
 func TestNezhaVariable(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
-
+	utils.InitEVMPool(dbFile, runtime.NumCPU())
 	// concurrently simulate transactions to capture read/write sets
 	txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
 
-	utils.InitEVMPool(dbFile, runtime.NumCPU())
 	start := time.Now()
 	// 步骤 1: 构建图
 	start1 := time.Now()
@@ -1305,10 +1253,8 @@ func OpenDB(dbFile string) *leveldb.DB {
 func TestVegeta(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
 
 	txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
-
 	utils.InitEVMPool(dbFile, runtime.NumCPU())
 	start := time.Now()
-
 	// Step 1: Build speculative RS/WS and txID→nodes mapping
 	txToNodes := make(map[string][]*core.RWNode)
 	speculativeRS := make(map[string]map[string]bool)

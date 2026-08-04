@@ -37,6 +37,158 @@ var evmPool *sync.Pool
 var evmPoolInstances []*EVMInstance
 var evmPoolCounter int32
 
+func topologicalSortContracts(contracts []ContractConfig) []ContractConfig {
+	nameToIdx := make(map[string]int)
+	for i, c := range contracts {
+		nameToIdx[c.Name] = i
+	}
+
+	visited := make(map[string]bool)
+	inStack := make(map[string]bool)
+	var result []ContractConfig
+
+	var visit func(name string) bool
+	visit = func(name string) bool {
+		if inStack[name] {
+			return false
+		}
+		if visited[name] {
+			return true
+		}
+		inStack[name] = true
+		idx, ok := nameToIdx[name]
+		if !ok {
+			inStack[name] = false
+			visited[name] = true
+			return true
+		}
+		for _, dep := range contracts[idx].Dependencies {
+			if !visit(dep.Contract) {
+				inStack[name] = false
+				return false
+			}
+		}
+		inStack[name] = false
+		visited[name] = true
+		result = append(result, contracts[idx])
+		return true
+	}
+
+	for _, c := range contracts {
+		if !visited[c.Name] {
+			if !visit(c.Name) {
+				fmt.Printf("Warning: circular dependency detected involving %s, falling back to original order\n", c.Name)
+				return contracts
+			}
+		}
+	}
+
+	return result
+}
+
+func encodeConstructorArgs(abiObject abi.ABI, depAddrs map[string]common.Address, contractConfig ContractConfig) ([]byte, error) {
+	if len(abiObject.Constructor.Inputs) == 0 {
+		return nil, nil
+	}
+
+	var args []interface{}
+	for _, input := range abiObject.Constructor.Inputs {
+		found := false
+		for _, dep := range contractConfig.Dependencies {
+			if dep.ParamName == input.Name {
+				addr, ok := depAddrs[dep.Contract]
+				if !ok {
+					return nil, fmt.Errorf("dependency %s not deployed for contract %s", dep.Contract, contractConfig.Name)
+				}
+				args = append(args, addr)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("constructor parameter %s has no matching dependency in contract %s", input.Name, contractConfig.Name)
+		}
+	}
+
+	encoded, err := abiObject.Constructor.Inputs.Pack(args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode constructor args for %s: %w", contractConfig.Name, err)
+	}
+
+	return encoded, nil
+}
+
+func deployContractWithDeps(
+	lvm *levm.LEVM,
+	fromAddr common.Address,
+	contractConfig ContractConfig,
+	depAddrs map[string]common.Address,
+) (common.Address, abi.ABI, error) {
+	abiObject, binData, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
+	if err != nil {
+		return common.Address{}, abi.ABI{}, fmt.Errorf("failed to load contract %s: %w", contractConfig.Name, err)
+	}
+
+	deployData := binData
+
+	if len(contractConfig.Dependencies) > 0 {
+		ctorArgs, err := encodeConstructorArgs(abiObject, depAddrs, contractConfig)
+		if err != nil {
+			return common.Address{}, abi.ABI{}, fmt.Errorf("failed to encode constructor for %s: %w", contractConfig.Name, err)
+		}
+		deployData = append(binData, ctorArgs...)
+		//fmt.Printf("    Constructor args encoded for %s (%d bytes)\n", contractConfig.Name, len(ctorArgs))
+	}
+
+	_, addr, _, err := lvm.DeployContract(fromAddr, deployData)
+	if err != nil {
+		return common.Address{}, abi.ABI{}, fmt.Errorf("failed to deploy contract %s: %w", contractConfig.Name, err)
+	}
+
+	return addr, abiObject, nil
+}
+
+func DeployAllContracts(lvm *levm.LEVM, fromAddr common.Address) (map[string]common.Address, map[string]abi.ABI) {
+	cm := GetContractManager()
+	contractAddrs := make(map[string]common.Address)
+	abis := make(map[string]abi.ABI)
+
+	if cm == nil {
+		abiObject, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
+			"./SmallBank/small_bank_sol_SmallBank.bin")
+		_, addr, _, _ := lvm.DeployContract(fromAddr, binData)
+		contractAddrs["SmallBank"] = addr
+		abis["SmallBank"] = abiObject
+		return contractAddrs, abis
+	}
+
+	sortedContracts := topologicalSortContracts(cm.GetAllContracts())
+	depAddrs := make(map[string]common.Address)
+
+	for _, contractConfig := range sortedContracts {
+		//fmt.Printf("    Deploying contract: %s", contractConfig.Name)
+		// if len(contractConfig.Dependencies) > 0 {
+		// 	//fmt.Printf(" (depends on:")
+		// 	// for _, dep := range contractConfig.Dependencies {
+		// 	// 	fmt.Printf(" %s", dep.Contract)
+		// 	// }
+		// 	// fmt.Printf(")")
+		// }
+		// fmt.Println()
+
+		addr, abiObject, err := deployContractWithDeps(lvm, fromAddr, contractConfig, depAddrs)
+		if err != nil {
+			fmt.Printf("      Failed to deploy contract %s: %v\n", contractConfig.Name, err)
+			continue
+		}
+		contractAddrs[contractConfig.Name] = addr
+		abis[contractConfig.Name] = abiObject
+		depAddrs[contractConfig.Name] = addr
+	}
+
+	return contractAddrs, abis
+}
+
 func CloseEVMPool() {
 	if evmPool == nil {
 		return
@@ -73,32 +225,7 @@ func InitEVMPool(dbFile string, poolSize int) {
 			lvm := levm.New(uniqueDBFile, big.NewInt(0), common.Address{})
 			lvm.NewAccount(common.Address{}, big.NewInt(1e18))
 
-			contractAddrs := make(map[string]common.Address)
-			abis := make(map[string]abi.ABI)
-
-			if cm != nil {
-				for _, contractConfig := range cm.GetAllContracts() {
-					fmt.Printf("    Deploying contract: %s\n", contractConfig.Name)
-					abiObject, binData, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
-					if err != nil {
-						fmt.Printf("      Failed to load contract %s: %v\n", contractConfig.Name, err)
-						continue
-					}
-					_, addr, _, err := lvm.DeployContract(common.Address{}, binData)
-					if err != nil {
-						fmt.Printf("      Failed to deploy contract %s: %v\n", contractConfig.Name, err)
-						continue
-					}
-					contractAddrs[contractConfig.Name] = addr
-					abis[contractConfig.Name] = abiObject
-				}
-			} else {
-				abiObject, binData, _ := tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
-					"./SmallBank/small_bank_sol_SmallBank.bin")
-				_, addr, _, _ := lvm.DeployContract(common.Address{}, binData)
-				contractAddrs["SmallBank"] = addr
-				abis["SmallBank"] = abiObject
-			}
+			contractAddrs, abis := DeployAllContracts(lvm, common.Address{})
 
 			inst := &EVMInstance{
 				lvm:           lvm,
@@ -230,7 +357,7 @@ func txCollector(addrNum uint64, txNum int, skew float64) [][]*core.RWNode {
 		wAddr1 := z.Uint64()
 		wAddr2 := z.Uint64()
 
-		tx := core.CreateRWNode(strconv.FormatInt(int64(i), 10), uint32(i), [][]byte{[]byte(strconv.FormatUint(rAddr1, 10)),
+		tx := core.CreateRWNode(strconv.FormatInt(int64(i), 10), uint32(i), "", [][]byte{[]byte(strconv.FormatUint(rAddr1, 10)),
 			[]byte(strconv.FormatUint(rAddr2, 10))}, [][]byte{[]byte("1"), []byte("2")},
 			[][]byte{[]byte(strconv.FormatUint(wAddr1, 10)), []byte(strconv.FormatUint(wAddr2, 10))},
 			[][]byte{[]byte("1"), []byte("2")})
@@ -262,22 +389,14 @@ func CaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][]*c
 		if cm != nil {
 			contractConfig := cm.RandomSelectContract(r)
 			contractName = contractConfig.Name
-			var err error
-			abiObject, err = cm.GetABI(contractName)
-			if err != nil {
-				fmt.Printf("Warning: failed to get ABI for %s: %v\n", contractName, err)
+			contractAddrs, abis := DeployAllContracts(lvm, fromAddr)
+			var ok bool
+			addr, ok = contractAddrs[contractName]
+			if !ok {
+				fmt.Printf("Warning: contract %s not deployed\n", contractName)
 				continue
 			}
-			_, binData, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
-			if err != nil {
-				fmt.Printf("Warning: failed to load contract %s: %v\n", contractName, err)
-				continue
-			}
-			_, addr, _, err = lvm.DeployContract(fromAddr, binData)
-			if err != nil {
-				fmt.Printf("Warning: failed to deploy contract %s: %v\n", contractName, err)
-				continue
-			}
+			abiObject = abis[contractName]
 		} else {
 			contractName = "SmallBank"
 			var err error
@@ -348,7 +467,7 @@ func CaptureRWSet(addrNum uint64, txNum int, skew float64, dbFile string) [][]*c
 			//fmt.Printf("T_%d, Write/value: %s%s\n", i, s1, v1)
 		}
 
-		rwNodes := core.CreateRWNode(strconv.FormatInt(int64(i), 10), uint32(i), rAddr, rValue, wAddr, wValue)
+		rwNodes := core.CreateRWNode(strconv.FormatInt(int64(i), 10), uint32(i), contractName, rAddr, rValue, wAddr, wValue)
 		txs = append(txs, rwNodes)
 	}
 
@@ -407,25 +526,15 @@ func ConCaptureRWSetWithTransactions(
 				wg.Done()
 				return
 			}
-			var err error
-			abiObject, err = cm.GetABI(tx.ContractName)
-			if err != nil {
-				fmt.Printf("Warning: failed to get ABI for %s: %v\n", tx.ContractName, err)
+			contractAddrs, abis := DeployAllContracts(lvm, fromAddr)
+			addr, ok = contractAddrs[tx.ContractName]
+			if !ok {
+				fmt.Printf("Warning: contract %s not deployed\n", tx.ContractName)
 				wg.Done()
 				return
 			}
-			_, binData, err := tools.LoadContract(contractConfig.ABIPath, contractConfig.BinPath)
-			if err != nil {
-				fmt.Printf("Warning: failed to load contract %s: %v\n", tx.ContractName, err)
-				wg.Done()
-				return
-			}
-			_, addr, _, err = lvm.DeployContract(fromAddr, binData)
-			if err != nil {
-				fmt.Printf("Warning: failed to deploy contract %s: %v\n", tx.ContractName, err)
-				wg.Done()
-				return
-			}
+			abiObject = abis[tx.ContractName]
+			_ = contractConfig
 		} else {
 			var err error
 			abiObject, _, err = tools.LoadContract("./SmallBank/small_bank_sol_SmallBank.abi",
@@ -462,7 +571,7 @@ func ConCaptureRWSetWithTransactions(
 			wValue = append(wValue, v)
 		}
 
-		rwNodes := core.CreateRWNode(strconv.FormatInt(int64(n), 10), uint32(n), rAddr, rValue, wAddr, wValue)
+		rwNodes := core.CreateRWNode(strconv.FormatInt(int64(n), 10), uint32(n), tx.ContractName, rAddr, rValue, wAddr, wValue)
 
 		lock.Lock()
 		txs = append(txs, rwNodes)

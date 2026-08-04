@@ -32,16 +32,12 @@ func CreateGraph(rwNodes [][]*RWNode) *QueueGraph {
 	var queues = make(map[string]*Queue)
 
 	for _, rw := range rwNodes {
-		// build edges
 		id := rw[0].TransInfo.ID
 		edge := &Edge{rw, false}
 		edges[id] = edge
 
-		// create vertices
 		for _, n := range rw {
-			key := n.RWSet.Key
-			newKey := ConvertByte2String(key)
-			queueArray[newKey] = append(queueArray[newKey], n)
+			queueArray[n.CompositeKey()] = append(queueArray[n.CompositeKey()], n)
 		}
 	}
 
@@ -103,14 +99,11 @@ func (cq *QueueGraph) QueuesSort() []string {
 		temp := map[string]struct{}{}
 
 		for _, w := range cq.Queues[key].wSlice {
-			rwKey := w.RWSet.Key
 			id := w.TransInfo.ID
 
 			for _, n := range cq.Edges[id].set {
-				rwKey2 := n.RWSet.Key
-				if reflect.DeepEqual(n.Label, "r") && !reflect.DeepEqual(rwKey, rwKey2) {
-					newKey := ConvertByte2String(rwKey2)
-					temp[newKey] = struct{}{}
+				if n.Label == "r" && n.CompositeKey() != w.CompositeKey() {
+					temp[n.CompositeKey()] = struct{}{}
 				}
 			}
 		}
@@ -246,12 +239,10 @@ func (cq *QueueGraph) sortInQueue(queue *Queue) {
 
 				for _, rw := range edge {
 					if rw.Label == "r" && rw.isAssigned {
-						if reflect.DeepEqual(w.RWSet.Key, rw.RWSet.Key) {
-							// has related rNode at the same address
+						if w.CompositeKey() == rw.CompositeKey() {
 							isSame = true
 							break
 						} else {
-							// read unit is assigned before write unit (r-w)
 							isBefore = true
 						}
 					}

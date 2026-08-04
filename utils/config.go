@@ -14,13 +14,21 @@ type ContractFunction struct {
 }
 
 type ContractConfig struct {
-	Name          string            `yaml:"name"`
-	Weight        int               `yaml:"weight"`
-	ABIPath       string            `yaml:"abi_path"`
-	BinPath       string            `yaml:"bin_path"`
-	SourcePath    string            `yaml:"source_path"`
-	StorageLayout []StorageMapping  `yaml:"storage_layout"`
-	Functions     []ContractFunction `yaml:"functions"`
+	Name              string               `yaml:"name"`
+	Weight            int                  `yaml:"weight"`
+	ABIPath           string               `yaml:"abi_path"`
+	BinPath           string               `yaml:"bin_path"`
+	SourcePath        string               `yaml:"source_path"`
+	StorageLayoutPath string               `yaml:"storage_layout_path,omitempty"`
+	StorageLayout     []StorageMapping     `yaml:"storage_layout,omitempty"`
+	Functions         []ContractFunction   `yaml:"functions"`
+	Dependencies      []ContractDependency `yaml:"dependencies,omitempty"`
+}
+
+type ContractDependency struct {
+	Contract  string `yaml:"contract"`
+	InjectAs  string `yaml:"inject_as"`
+	ParamName string `yaml:"param_name"`
 }
 
 type GlobalConfig struct {

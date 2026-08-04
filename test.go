@@ -720,7 +720,8 @@ func recalculateConservativeKeys(ctx *core.TransactionContext, currentState map[
 
 // TestDepurge test
 func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
-
+	utils.InitEVMPool(dbFile, runtime.NumCPU()*2)
+	start := time.Now()
 	cm := utils.GetContractManager()
 	allFuncPairs := cm.GetAllFunctionsForPreAnalysis()
 	utils.PreAnalyzeContract(allFuncPairs)
@@ -728,22 +729,21 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 	// txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
 	txs, contexts := utils.LLMCaptureRWSet(txList, dbFile, true)
 
-	//测试保守读写集
-	if ctx1, ok := contexts["1"]; ok {
-		if ctx3, ok := contexts["3"]; ok {
-			// ctx1.PreReadSet = make(map[string][]byte) // 或你实际使用的类型
-			// ctx1.PreWriteSet = make(map[string][]byte)
+	// //测试保守读写集
+	// if ctx1, ok := contexts["1"]; ok {
+	// 	if ctx3, ok := contexts["3"]; ok {
+	// 		// ctx1.PreReadSet = make(map[string][]byte) // 或你实际使用的类型
+	// 		// ctx1.PreWriteSet = make(map[string][]byte)
 
-			for key, val := range ctx3.PreReadSet {
-				ctx1.PreReadSet[key] = val
-			}
-			for key, val := range ctx3.PreWriteSet {
-				ctx1.PreWriteSet[key] = val
-			}
-		}
-	}
-	utils.InitEVMPool(dbFile, runtime.NumCPU()*2)
-	start := time.Now()
+	// 		for key, val := range ctx3.PreReadSet {
+	// 			ctx1.PreReadSet[key] = val
+	// 		}
+	// 		for key, val := range ctx3.PreWriteSet {
+	// 			ctx1.PreWriteSet[key] = val
+	// 		}
+	// 	}
+	// }
+
 	start1 := time.Now()
 	scheduler, _ := core.Depurge_schedule(contexts)
 	duration1 := time.Since(start1)

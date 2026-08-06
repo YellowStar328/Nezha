@@ -1,0 +1,22 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "voteWeight"
+    },
+    {
+      "account": "global",
+      "field": "totalVoters"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "voteWeight"
+    },
+    {
+      "account": "global",
+      "field": "totalVoters"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "ownerOf"
+    },
+    {
+      "account": "global",
+      "field": "totalItems"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "ownerOf"
+    },
+    {
+      "account": "addr1",
+      "field": "approved"
+    },
+    {
+      "account": "global",
+      "field": "totalItems"
+    }
+  ]
+}

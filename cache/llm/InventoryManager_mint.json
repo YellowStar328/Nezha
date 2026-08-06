@@ -1,0 +1,26 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "totalItems"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "ownerOf"
+    },
+    {
+      "account": "addr1",
+      "field": "price"
+    },
+    {
+      "account": "addr1",
+      "field": "stockLevel"
+    },
+    {
+      "account": "global",
+      "field": "totalItems"
+    }
+  ]
+}

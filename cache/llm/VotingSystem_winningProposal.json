@@ -1,0 +1,9 @@
+{
+  "reads": [
+    {
+      "account": "arg0",
+      "field": "proposalVotes"
+    }
+  ],
+  "writes": []
+}

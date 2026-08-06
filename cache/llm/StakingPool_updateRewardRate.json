@@ -1,0 +1,26 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "rewardRate"
+    },
+    {
+      "account": "global",
+      "field": "accRewardPerShare"
+    },
+    {
+      "account": "global",
+      "field": "totalStaked"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "rewardRate"
+    },
+    {
+      "account": "global",
+      "field": "accRewardPerShare"
+    }
+  ]
+}

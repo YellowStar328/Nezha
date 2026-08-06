@@ -1,0 +1,32 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "orderState"
+    },
+    {
+      "account": "addr1",
+      "field": "orderSeller"
+    },
+    {
+      "account": "addr1",
+      "field": "orderAmount"
+    },
+    {
+      "account": "global",
+      "field": "usdt"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "orderState"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "USDT",
+      "function": "transfer"
+    }
+  ]
+}

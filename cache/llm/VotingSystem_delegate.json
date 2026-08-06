@@ -1,0 +1,30 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "hasVoted"
+    },
+    {
+      "account": "addr1",
+      "field": "voteWeight"
+    },
+    {
+      "account": "addr2",
+      "field": "voteWeight"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "delegateTo"
+    },
+    {
+      "account": "addr2",
+      "field": "voteWeight"
+    },
+    {
+      "account": "addr1",
+      "field": "hasVoted"
+    }
+  ]
+}

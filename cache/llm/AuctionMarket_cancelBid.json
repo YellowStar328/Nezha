@@ -1,0 +1,14 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "bids"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "bids"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "highestBid"
+    },
+    {
+      "account": "global",
+      "field": "highestBidder"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "bids"
+    },
+    {
+      "account": "global",
+      "field": "highestBidder"
+    },
+    {
+      "account": "global",
+      "field": "highestBid"
+    }
+  ]
+}

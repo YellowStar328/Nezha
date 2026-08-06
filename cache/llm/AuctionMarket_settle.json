@@ -1,0 +1,14 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "ended"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "ended"
+    }
+  ]
+}

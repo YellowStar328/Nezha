@@ -1,0 +1,26 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "hasVoted"
+    },
+    {
+      "account": "addr1",
+      "field": "voteWeight"
+    },
+    {
+      "account": "arg1",
+      "field": "proposalVotes"
+    }
+  ],
+  "writes": [
+    {
+      "account": "arg1",
+      "field": "proposalVotes"
+    },
+    {
+      "account": "addr1",
+      "field": "hasVoted"
+    }
+  ]
+}

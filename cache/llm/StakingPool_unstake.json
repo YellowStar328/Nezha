@@ -1,0 +1,40 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "stakedAmount"
+    },
+    {
+      "account": "global",
+      "field": "accRewardPerShare"
+    },
+    {
+      "account": "global",
+      "field": "totalStaked"
+    },
+    {
+      "account": "global",
+      "field": "usdt"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "rewardDebt"
+    },
+    {
+      "account": "addr1",
+      "field": "stakedAmount"
+    },
+    {
+      "account": "global",
+      "field": "totalStaked"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "USDT",
+      "function": "transfer"
+    }
+  ]
+}

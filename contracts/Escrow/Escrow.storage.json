@@ -1,0 +1,72 @@
+{
+  "storage": [
+    {
+      "astId": 17,
+      "contract": "/sources/Escrow.sol:Escrow",
+      "label": "orderState",
+      "offset": 0,
+      "slot": "0",
+      "type": "t_mapping(t_string_memory_ptr,t_uint256)"
+    },
+    {
+      "astId": 21,
+      "contract": "/sources/Escrow.sol:Escrow",
+      "label": "orderSeller",
+      "offset": 0,
+      "slot": "1",
+      "type": "t_mapping(t_string_memory_ptr,t_string_storage)"
+    },
+    {
+      "astId": 25,
+      "contract": "/sources/Escrow.sol:Escrow",
+      "label": "orderAmount",
+      "offset": 0,
+      "slot": "2",
+      "type": "t_mapping(t_string_memory_ptr,t_uint256)"
+    },
+    {
+      "astId": 27,
+      "contract": "/sources/Escrow.sol:Escrow",
+      "label": "usdt",
+      "offset": 0,
+      "slot": "3",
+      "type": "t_contract(IUSDT)13"
+    }
+  ],
+  "types": {
+    "t_contract(IUSDT)13": {
+      "encoding": "inplace",
+      "label": "contract IUSDT",
+      "numberOfBytes": "20"
+    },
+    "t_mapping(t_string_memory_ptr,t_string_storage)": {
+      "encoding": "mapping",
+      "key": "t_string_memory_ptr",
+      "label": "mapping(string => string)",
+      "numberOfBytes": "32",
+      "value": "t_string_storage"
+    },
+    "t_mapping(t_string_memory_ptr,t_uint256)": {
+      "encoding": "mapping",
+      "key": "t_string_memory_ptr",
+      "label": "mapping(string => uint256)",
+      "numberOfBytes": "32",
+      "value": "t_uint256"
+    },
+    "t_string_memory_ptr": {
+      "encoding": "bytes",
+      "label": "string",
+      "numberOfBytes": "32"
+    },
+    "t_string_storage": {
+      "encoding": "bytes",
+      "label": "string",
+      "numberOfBytes": "32"
+    },
+    "t_uint256": {
+      "encoding": "inplace",
+      "label": "uint256",
+      "numberOfBytes": "32"
+    }
+  }
+}

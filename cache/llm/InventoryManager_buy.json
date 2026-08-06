@@ -1,0 +1,26 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "stockLevel"
+    },
+    {
+      "account": "addr1",
+      "field": "price"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "stockLevel"
+    },
+    {
+      "account": "addr1",
+      "field": "ownerOf"
+    },
+    {
+      "account": "addr1",
+      "field": "approved"
+    }
+  ]
+}

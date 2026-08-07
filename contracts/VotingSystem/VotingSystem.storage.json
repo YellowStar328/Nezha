@@ -22,7 +22,7 @@
       "label": "proposalVotes",
       "offset": 0,
       "slot": "2",
-      "type": "t_mapping(t_uint256,t_uint256)"
+      "type": "t_mapping(t_string_memory_ptr,t_uint256)"
     },
     {
       "astId": 17,
@@ -65,13 +65,6 @@
       "encoding": "mapping",
       "key": "t_string_memory_ptr",
       "label": "mapping(string => uint256)",
-      "numberOfBytes": "32",
-      "value": "t_uint256"
-    },
-    "t_mapping(t_uint256,t_uint256)": {
-      "encoding": "mapping",
-      "key": "t_uint256",
-      "label": "mapping(uint256 => uint256)",
       "numberOfBytes": "32",
       "value": "t_uint256"
     },

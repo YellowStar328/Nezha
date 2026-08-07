@@ -9,13 +9,13 @@
       "field": "voteWeight"
     },
     {
-      "account": "arg1",
+      "account": "addr2",
       "field": "proposalVotes"
     }
   ],
   "writes": [
     {
-      "account": "arg1",
+      "account": "addr2",
       "field": "proposalVotes"
     },
     {

@@ -3,7 +3,7 @@ pragma solidity >=0.4.24 <0.7.0;
 contract VotingSystem {
     mapping(string => uint256) public voteWeight;        // 选民权重
     mapping(string => bool) public hasVoted;             // 是否已投
-    mapping(uint256 => uint256) public proposalVotes;    // 提案得票（热点）
+    mapping(string => uint256) public proposalVotes;    // 提案得票（热点）
     mapping(string => string) public delegateTo;         // 委托目标
     uint256 public totalVoters;                          // 总投票人（热点）
 
@@ -16,7 +16,7 @@ contract VotingSystem {
         }
     }
 
-    function vote(string memory arg0, uint256 arg1) public {
+    function vote(string memory arg0, string memory arg1) public {
         bool voted = hasVoted[arg0];
         if (!voted) {
             uint256 w = voteWeight[arg0];
@@ -38,7 +38,7 @@ contract VotingSystem {
     }
 
     // 查询某提案得票（view）
-    function winningProposal(uint256 arg0) public view returns (uint256) {
+    function winningProposal(string memory arg0) public view returns (uint256) {
         return proposalVotes[arg0];
     }
 }

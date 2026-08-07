@@ -753,6 +753,12 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 	validationAborted := 0
 	committedState := make(map[string][]byte)
 
+	// 串行重放：仅 key 超出保守集的 abort 事务按 TxID 字典序重放
+	var serialReplayList []string
+	var serialReplayLock sync.Mutex
+	var noContextCount int32
+	var reexecErrorCount int32
+
 	type validatedTransaction struct {
 		txID         string
 		writeDelta   map[string]*big.Int
@@ -776,6 +782,7 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 		if !exists {
 			fmt.Printf("  TX %s: aborted (context not found)\n", txID)
 			validationAborted++
+			atomic.AddInt32(&noContextCount, 1)
 			scheduler.Abort(txID)
 			atomic.AddInt32(&inProgress, -1)
 			return
@@ -789,6 +796,7 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 		if err != nil {
 			fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
 			validationAborted++
+			atomic.AddInt32(&reexecErrorCount, 1)
 			scheduler.Abort(txID)
 			atomic.AddInt32(&inProgress, -1)
 			return
@@ -852,6 +860,9 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 			fmt.Printf("    LLM Writes: %v\n", ctx.LLMWrites)
 			validationAborted++
 			scheduler.Abort(txID)
+			serialReplayLock.Lock()
+			serialReplayList = append(serialReplayList, txID)
+			serialReplayLock.Unlock()
 			atomic.AddInt32(&inProgress, -1)
 			return
 		}
@@ -920,6 +931,34 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 		}
 	}
 
+	// 串行重放：key 超出保守集的 abort 事务按 TxID 字典序重放
+	startSerial := time.Now()
+	sort.Strings(serialReplayList)
+	serialReplayed := 0
+	for _, txID := range serialReplayList {
+		ctx, exists := contexts[txID]
+		if !exists {
+			continue
+		}
+		committedStateLock.RLock()
+		contractState := filterContractState(committedState, ctx.ContractName)
+		committedStateLock.RUnlock()
+
+		_, _, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, contractState)
+		if err != nil {
+			fmt.Printf("  TX %s: serial replay failed (re-execution error: %v)\n", txID, err)
+			continue
+		}
+
+		committedStateLock.Lock()
+		updateCommittedState(committedState, ctx.ContractName, writeDelta)
+		committedStateLock.Unlock()
+		serialReplayed++
+	}
+	durationSerial := time.Since(startSerial)
+	writer.WriteString(fmt.Sprintf("Time of serial replay: %s\n", durationSerial))
+	writer.WriteString(fmt.Sprintf("Serial replayed: %d\n", serialReplayed))
+
 	duration2 := time.Since(start2)
 	writer.WriteString(fmt.Sprintf("Time of validation and execution: %s\n", duration2))
 	writer.WriteString(fmt.Sprintf("Total pruned keys: %d\n", totalPrunedKeys))
@@ -965,7 +1004,10 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 
 	duration := time.Since(start)
 
-	writer.WriteString(fmt.Sprintf("Validation aborted: %d\n", validationAborted))
+	writer.WriteString(fmt.Sprintf("Validation aborted (total): %d\n", validationAborted))
+	writer.WriteString(fmt.Sprintf("  - context not found: %d\n", atomic.LoadInt32(&noContextCount)))
+	writer.WriteString(fmt.Sprintf("  - re-execution error: %d\n", atomic.LoadInt32(&reexecErrorCount)))
+	writer.WriteString(fmt.Sprintf("  - key exceed (serial replayed): %d\n", serialReplayed))
 	writer.WriteString(fmt.Sprintf("Abort rate is: %.3f\n", float64(validationAborted)/float64(len(txs))))
 	writer.WriteString(fmt.Sprintf("Time of processing TXs on Depurge: %s\n", duration))
 	writer.WriteString(fmt.Sprintf("===================================================\n"))
@@ -1387,6 +1429,8 @@ func TestVegeta(txList []utils.Transaction, writer *bufio.Writer, dbFile string)
 
 	var serialReplayList []string
 	algorithmAborted := 0
+	var noContextCount int32
+	var reexecErrorCount int32
 
 	for len(remaining) > 0 {
 		var batch []string
@@ -1418,6 +1462,7 @@ func TestVegeta(txList []utils.Transaction, writer *bufio.Writer, dbFile string)
 			txID := i.(string)
 			ctx, exists := contexts[txID]
 			if !exists {
+				atomic.AddInt32(&noContextCount, 1)
 				resultsLock.Lock()
 				batchResults[txID] = false
 				resultsLock.Unlock()
@@ -1431,6 +1476,7 @@ func TestVegeta(txList []utils.Transaction, writer *bufio.Writer, dbFile string)
 
 			realReadKeys, realWriteKeys, writeDelta, err := utils.ReExecuteAndGetRealRWSet(ctx, dbFile, contractState)
 			if err != nil {
+				atomic.AddInt32(&reexecErrorCount, 1)
 				resultsLock.Lock()
 				batchResults[txID] = false
 				resultsLock.Unlock()
@@ -1460,6 +1506,7 @@ func TestVegeta(txList []utils.Transaction, writer *bufio.Writer, dbFile string)
 			if !match {
 				resultsLock.Lock()
 				batchResults[txID] = false
+				serialReplayList = append(serialReplayList, txID)
 				resultsLock.Unlock()
 				wg.Done()
 				return
@@ -1486,18 +1533,16 @@ func TestVegeta(txList []utils.Transaction, writer *bufio.Writer, dbFile string)
 		for _, txID := range batch {
 			delete(remaining, txID)
 			executed[txID] = true
-
-			if !batchResults[txID] {
-				serialReplayList = append(serialReplayList, txID)
-			}
 		}
 	}
 
 	durationValidation := time.Since(start4)
 	writer.WriteString(fmt.Sprintf("Time of replay (validation): %s\n", durationValidation))
 
-	// Step 5: Serial replay of inconsistent transactions
+	// Step 5: Serial replay of inconsistent transactions (按 TxID 字典序)
 	start5 := time.Now()
+	sort.Strings(serialReplayList)
+	serialReplayed := 0
 	for _, txID := range serialReplayList {
 		ctx, exists := contexts[txID]
 		if !exists {
@@ -1511,6 +1556,7 @@ func TestVegeta(txList []utils.Transaction, writer *bufio.Writer, dbFile string)
 		}
 
 		updateCommittedState(committedState, ctx.ContractName, writeDelta)
+		serialReplayed++
 	}
 	durationSerial := time.Since(start5)
 	writer.WriteString(fmt.Sprintf("Time of serial replay: %s\n", durationSerial))
@@ -1549,8 +1595,10 @@ func TestVegeta(txList []utils.Transaction, writer *bufio.Writer, dbFile string)
 
 	duration := time.Since(start)
 
-	writer.WriteString(fmt.Sprintf("Algorithm aborted: %d, Serial replayed: %d\n",
-		algorithmAborted, len(serialReplayList)))
+	writer.WriteString(fmt.Sprintf("Algorithm aborted (total): %d\n", algorithmAborted))
+	writer.WriteString(fmt.Sprintf("  - context not found: %d\n", atomic.LoadInt32(&noContextCount)))
+	writer.WriteString(fmt.Sprintf("  - re-execution error: %d\n", atomic.LoadInt32(&reexecErrorCount)))
+	writer.WriteString(fmt.Sprintf("  - key exceed (serial replayed): %d\n", serialReplayed))
 	writer.WriteString(fmt.Sprintf("Time of processing TXs on Vegeta: %s\n", duration))
 	writer.WriteString(fmt.Sprintf("===================================================\n"))
 	writer.Flush()

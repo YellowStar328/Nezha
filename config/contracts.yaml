@@ -140,8 +140,7 @@ contracts:
         args: 2
         arg_mapping:
           arg0: addr1
-        fixed_args:
-          arg1: 0
+          arg1: addr2
       - name: delegate
         args: 2
         arg_mapping:
@@ -149,8 +148,8 @@ contracts:
           arg1: addr2
       - name: winningProposal
         args: 1
-        fixed_args:
-          arg0: 0
+        arg_mapping:
+          arg0: addr1
   # 托管支付：测试状态机互斥 + 跨合约调用 USDT
   - name: Escrow
     weight: 1

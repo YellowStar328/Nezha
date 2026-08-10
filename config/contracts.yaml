@@ -4,7 +4,7 @@ global:
   zipf_skew: 0.6
 contracts:
   - name: SmallBank
-    weight: 1
+    weight: 27
     abi_path: "./contracts/SmallBank/small_bank_sol_SmallBank.abi"
     bin_path: "./contracts/SmallBank/small_bank_sol_SmallBank.bin"
     source_path: "./contracts/SmallBank/small_bank.sol"
@@ -45,7 +45,7 @@ contracts:
         fixed_args:
           arg1: 20
   - name: USDT
-    weight: 1
+    weight: 0
     abi_path: "./contracts/USDT/USDT.abi"
     bin_path: "./contracts/USDT/USDT.bin"
     source_path: "./contracts/USDT/usdt.sol"
@@ -68,8 +68,38 @@ contracts:
           arg1: addr2
         fixed_args:
           arg2: 100
+  - name: VotingSystem
+    weight: 54
+    abi_path: "./contracts/VotingSystem/VotingSystem.abi"
+    bin_path: "./contracts/VotingSystem/VotingSystem.bin"
+    source_path: "./contracts/VotingSystem/VotingSystem.sol"
+    dependencies:
+      - contract: USDT
+        inject_as: constructor
+        param_name: _usdtAddr
+    storage_layout_path: "./contracts/VotingSystem/VotingSystem.storage.json"
+    functions:
+      - name: delegate
+        args: 2
+        arg_mapping:
+          arg0: addr1
+        fixed_args:
+          arg1: 100000
+      - name: giveRightToVote
+        args: 2
+        arg_mapping:
+          arg0: addr1 
+        fixed_args:
+          arg1: 1000
+      - name: vote
+        args: 3
+        arg_mapping:
+          arg0: addr1      # 动态参数：随机选取压测用户]
+          arg1: addr2      # 动态参数：随机选取压测用户
+        fixed_args:
+          arg2: 100        # 固定参数：每次交换 100 的金额
   - name: DexRouter
-    weight: 1
+    weight: 0
     abi_path: "./contracts/DexRouter/DexRouter.abi"
     bin_path: "./contracts/DexRouter/DexRouter.bin"
     source_path: "./contracts/DexRouter/DexRouter.sol"
@@ -101,10 +131,11 @@ contracts:
           arg1: addr2      # 动态参数：随机选取压测用户
         fixed_args:
           arg2: 100        # 固定参数：每次交换 100 的金额
-  # ===== 以下为新增测试合约 =====
+
+  # ===== 以下为未建表测试合约 =====
   # 拍卖市场：测试热槽位争用（highestBid/highestBidder 单点写冲突）
   - name: AuctionMarket
-    weight: 1
+    weight: 7
     abi_path: "./contracts/AuctionMarket/AuctionMarket.abi"
     bin_path: "./contracts/AuctionMarket/AuctionMarket.bin"
     source_path: "./contracts/AuctionMarket/AuctionMarket.sol"
@@ -124,70 +155,52 @@ contracts:
           arg0: addr1
       - name: getHighest
         args: 0
-  # 投票系统：测试计数器多键累加 + 委托链跨账户依赖
-  - name: VotingSystem
-    weight: 1
-    abi_path: "./contracts/VotingSystem/VotingSystem.abi"
-    bin_path: "./contracts/VotingSystem/VotingSystem.bin"
-    source_path: "./contracts/VotingSystem/VotingSystem.sol"
-    storage_layout_path: "./contracts/VotingSystem/VotingSystem.storage.json"
-    functions:
-      - name: giveRightToVote
-        args: 1
-        arg_mapping:
-          arg0: addr1
-      - name: vote
-        args: 2
-        arg_mapping:
-          arg0: addr1
-          arg1: addr2
-      - name: delegate
-        args: 2
-        arg_mapping:
-          arg0: addr1
-          arg1: addr2
-      - name: winningProposal
-        args: 1
-        arg_mapping:
-          arg0: addr1
-  # 托管支付：测试状态机互斥 + 跨合约调用 USDT
+
+  # 
   - name: Escrow
-    weight: 1
+    weight: 6
     abi_path: "./contracts/Escrow/Escrow.abi"
     bin_path: "./contracts/Escrow/Escrow.bin"
     source_path: "./contracts/Escrow/Escrow.sol"
-    dependencies:
-      - contract: USDT
-        inject_as: constructor
-        param_name: _usdtAddr
     storage_layout_path: "./contracts/Escrow/Escrow.storage.json"
     functions:
-      - name: createOrder
-        args: 3
-        arg_mapping:
-          arg0: addr1
-          arg1: addr2
-        fixed_args:
-          arg2: 1000
-      - name: deposit
-        args: 1
-        arg_mapping:
-          arg0: addr1
-      - name: release
-        args: 1
-        arg_mapping:
-          arg0: addr1
-      - name: refund
-        args: 1
-        arg_mapping:
-          arg0: addr1
-      - name: dispute
-        args: 1
-        arg_mapping:
-          arg0: addr1
+    - name: almagate
+      args: 2
+      arg_mapping:
+        arg0: addr1
+        arg1: addr2
+    - name: getBalance
+      args: 1
+      arg_mapping:
+        arg0: addr1
+    - name: updateBalance
+      args: 2
+      arg_mapping:
+        arg0: addr1
+      fixed_args:
+        arg1: 100
+    - name: updateSaving
+      args: 2
+      arg_mapping:
+        arg0: addr1
+      fixed_args:
+        arg1: 100
+    - name: sendPayment
+      args: 3
+      arg_mapping:
+        arg0: addr1
+        arg1: addr2
+      fixed_args:
+        arg2: 25
+    - name: writeCheck
+      args: 2
+      arg_mapping:
+        arg0: addr1
+      fixed_args:
+        arg1: 20
   # 质押池：测试全局利率热点（accRewardPerShare）+ 跨合约 USDT 转账
   - name: StakingPool
-    weight: 1
+    weight: 6
     abi_path: "./contracts/StakingPool/StakingPool.abi"
     bin_path: "./contracts/StakingPool/StakingPool.bin"
     source_path: "./contracts/StakingPool/StakingPool.sol"
@@ -220,9 +233,11 @@ contracts:
         args: 1
         fixed_args:
           arg0: 10
+  # 投票系统：测试计数器多键累加 + 委托链跨账户依赖
+
   # 库存管理：测试所有权串行化 + 授权模式 + 条件买
   - name: InventoryManager
-    weight: 1
+    weight: 0
     abi_path: "./contracts/InventoryManager/InventoryManager.abi"
     bin_path: "./contracts/InventoryManager/InventoryManager.bin"
     source_path: "./contracts/InventoryManager/InventoryManager.sol"

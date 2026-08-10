@@ -148,7 +148,6 @@ func main() {
 	} else {
 		txList = utils.GenerateTransactions(addrNum, txNum, skew, 12345)
 	}
-
 	if all {
 		TestSerialExecution(txList, w)
 		TestConflictQueue(txList, w, dbFile1)
@@ -181,6 +180,7 @@ func main() {
 		}
 
 	}
+	CleanupDatabases()
 
 }
 
@@ -195,7 +195,7 @@ func CleanupDatabases() {
 		}
 	}
 
-	dbFilesPatterns := []string{dbFile7 + "_*", dbFile8 + "_*"}
+	dbFilesPatterns := []string{dbFile7 + "_*", dbFile8 + "_*", dbFile9 + "_*"}
 	for _, pattern := range dbFilesPatterns {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
@@ -722,10 +722,11 @@ func recalculateConservativeKeys(ctx *core.TransactionContext, currentState map[
 func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string) {
 	utils.InitEVMPool(dbFile, runtime.NumCPU()*2)
 	start := time.Now()
+	start_RW := time.Now()
 	cm := utils.GetContractManager()
 	allFuncPairs := cm.GetAllFunctionsForPreAnalysis()
 	utils.PreAnalyzeContract(allFuncPairs)
-
+	duration_RW := time.Since(start_RW)
 	// txs, contexts := utils.ConCaptureRWSetWithTransactions(txList, dbFile, true)
 	txs, contexts := utils.LLMCaptureRWSet(txList, dbFile, true)
 
@@ -743,12 +744,12 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 	// 		}
 	// 	}
 	// }
-
+	writer.WriteString(fmt.Sprintf("Time of pre-analysis: %s\n", duration_RW))
 	start1 := time.Now()
 	scheduler, _ := core.Depurge_schedule(contexts)
 	duration1 := time.Since(start1)
 	writer.WriteString(fmt.Sprintf("Time of schedule: %s\n", duration1))
-
+	start_exe := time.Now()
 	commitOrder := make(map[int32][][]*core.RWNode)
 	validationAborted := 0
 	committedState := make(map[string][]byte)
@@ -930,7 +931,8 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 			_ = validatePool.Invoke(txID)
 		}
 	}
-
+	duration_exe := time.Since(start_exe)
+	writer.WriteString(fmt.Sprintf("Time of execution: %s\n", duration_exe))
 	// 串行重放：key 超出保守集的 abort 事务按 TxID 字典序重放
 	startSerial := time.Now()
 	sort.Strings(serialReplayList)

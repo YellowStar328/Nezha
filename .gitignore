@@ -1,5 +1,8 @@
 # 编译的可执行文件
 test
+nezha
+relay-test
+contracts.yaml
 
 # 数据库目录
 DAG_*
@@ -23,3 +26,6 @@ utils/db_tool.go
 .dbg/nezha-validation-abort.env
 .dbg/trae-debug-log-nezha-validation-abort.ndjson
 debug-nezha-validation-abort.md
+
+datasets/
+data_check/

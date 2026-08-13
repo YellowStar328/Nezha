@@ -69,6 +69,16 @@ type PreExecuteAllResp struct {
 	DurationMs int64            `json:"durationMs"`
 }
 
+type SerialExecuteAllReq struct {
+	BlockNum uint64 `json:"blockNum"`
+}
+
+type SerialExecuteAllResp struct {
+	Ok         bool             `json:"ok"`
+	Results    []PreExecuteResp `json:"results"`
+	DurationMs int64            `json:"durationMs"`
+}
+
 type InfoResp struct {
 	FromBlock    int    `json:"fromBlock"`
 	ToBlock      int    `json:"toBlock"`
@@ -238,6 +248,63 @@ func (s *replayServer) doPreExecute(blockNum uint64, txIdx int) (*PreExecuteResp
 	}, nil
 }
 
+// doSerialExecute: single tx run on a persistent state (no copy).
+// Success commits changes to state; failure reverts.
+func (s *replayServer) doSerialExecute(state *state.StateDB, blockEnv *replayd.BlockEnv, txRaw interface{}, txIdx int) (*PreExecuteResp, error) {
+	res, err := s.executor.PreExecuteTx(state, blockEnv, txRaw, txIdx)
+	if err != nil {
+		return nil, fmt.Errorf("serialExecuteTx: %w", err)
+	}
+	return &PreExecuteResp{
+		Ok:        true,
+		TxIdx:     res.TxIndex,
+		TxHash:    res.TxHash,
+		Success:   res.Success,
+		GasUsed:   res.GasUsed,
+		ReadKeys:  res.ReadKeys,
+		WriteKeys: res.WriteKeys,
+		Error:     res.Error,
+	}, nil
+}
+
+func (s *replayServer) serialExecuteAll(w http.ResponseWriter, r *http.Request) {
+	var req SerialExecuteAllReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "decode: "+err.Error())
+		return
+	}
+
+	s.mu.RLock()
+	data := s.currentBlockData
+	if data == nil || s.currentBlock != req.BlockNum {
+		s.mu.RUnlock()
+		writeErr(w, http.StatusBadRequest, "call /load_block first")
+		return
+	}
+	blockEnv := *s.blockEnv
+	s.mu.RUnlock()
+
+	state := s.baseState.Copy()
+	n := len(data.Transactions)
+	results := make([]PreExecuteResp, n)
+	start := time.Now()
+
+	for i := 0; i < n; i++ {
+		res, err := s.doSerialExecute(state, &blockEnv, data.Transactions[i], i)
+		if err != nil {
+			results[i] = PreExecuteResp{Ok: false, TxIdx: i, Error: err.Error()}
+		} else {
+			results[i] = *res
+		}
+	}
+
+	writeJSON(w, http.StatusOK, SerialExecuteAllResp{
+		Ok:         true,
+		Results:    results,
+		DurationMs: time.Since(start).Milliseconds(),
+	})
+}
+
 // StartHTTPServer constructs and starts the replay daemon HTTP service.
 // It blocks until the server shuts down.
 func StartHTTPServer(listenAddr string, datasetDir string, concurrency int) error {
@@ -263,6 +330,7 @@ func StartHTTPServer(listenAddr string, datasetDir string, concurrency int) erro
 	mux.HandleFunc("/load_block", s.loadBlock)
 	mux.HandleFunc("/pre_execute", s.preExecute)
 	mux.HandleFunc("/pre_execute_all", s.preExecuteAll)
+	mux.HandleFunc("/serial_execute_all", s.serialExecuteAll)
 
 	httpSrv := &http.Server{
 		Addr:         listenAddr,

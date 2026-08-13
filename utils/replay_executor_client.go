@@ -17,9 +17,9 @@ import (
 // Schedulers use this to obtain speculative read/write sets without taking
 // a direct dependency on geth.
 type HTTPReplayExecutor struct {
-	baseURL    string
-	client     *http.Client
-	lastBlock  uint64 // last LoadBlock'd number (for sanity checks)
+	baseURL   string
+	client    *http.Client
+	lastBlock uint64 // last LoadBlock'd number (for sanity checks)
 }
 
 // NewHTTPReplayExecutor connects to an already-running eth-replayd instance.
@@ -74,6 +74,17 @@ type preExecAllReq struct {
 	BlockNum uint64 `json:"blockNum"`
 }
 type preExecAllResp struct {
+	Ok         bool          `json:"ok"`
+	Error      string        `json:"error,omitempty"`
+	Results    []preExecResp `json:"results"`
+	DurationMs int64         `json:"durationMs"`
+}
+
+type serialExecAllReq struct {
+	BlockNum uint64 `json:"blockNum"`
+}
+
+type serialExecAllResp struct {
 	Ok         bool          `json:"ok"`
 	Error      string        `json:"error,omitempty"`
 	Results    []preExecResp `json:"results"`
@@ -147,6 +158,36 @@ func (h *HTTPReplayExecutor) PreExecuteAll(blockNum uint64) ([]*core.ReplayRWSet
 	}
 	if !p.Ok {
 		return nil, fmt.Errorf("replayd /pre_execute_all (%d) error: %s", blockNum, p.Error)
+	}
+	out := make([]*core.ReplayRWSet, len(p.Results))
+	for i, r := range p.Results {
+		out[i] = &core.ReplayRWSet{
+			Ref: core.ReplayRef{
+				BlockNum: blockNum,
+				TxIndex:  i,
+				TxHash:   r.TxHash,
+			},
+			Success:   r.Success,
+			GasUsed:   r.GasUsed,
+			ReadKeys:  append([]string(nil), r.ReadKeys...),
+			WriteKeys: append([]string(nil), r.WriteKeys...),
+			Error:     r.Error,
+		}
+	}
+	return out, nil
+}
+
+// SerialExecuteAll runs all txs of a block serially on replayd with state
+// accumulation, capturing the actual read/write sets for each tx. This is
+// used to determine whether the speculative (PreExecute) RWset is a safe
+// over-approximation for parallel scheduling.
+func (h *HTTPReplayExecutor) SerialExecuteAll(blockNum uint64) ([]*core.ReplayRWSet, error) {
+	var p serialExecAllResp
+	if err := h.doJSON(http.MethodPost, "/serial_execute_all", serialExecAllReq{BlockNum: blockNum}, &p); err != nil {
+		return nil, err
+	}
+	if !p.Ok {
+		return nil, fmt.Errorf("replayd /serial_execute_all (%d) error: %s", blockNum, p.Error)
 	}
 	out := make([]*core.ReplayRWSet, len(p.Results))
 	for i, r := range p.Results {

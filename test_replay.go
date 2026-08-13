@@ -89,6 +89,7 @@ func runReplayMode(
 	}
 	if doCG {
 		TestReplayCG(writer, blockNum, specs, canonicalBlock)
+		TestReplayConflictQueue(writer, blockNum, specs, canonicalBlock)
 	}
 	if doDepurge {
 		TestReplayDepurge(writer, blockNum, specs, canonicalBlock)

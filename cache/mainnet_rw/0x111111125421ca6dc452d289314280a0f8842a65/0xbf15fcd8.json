@@ -1,0 +1,10 @@
+{
+  "reads": [],
+  "writes": [],
+  "crossCalls": [
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0xbf15fcd8"
+    }
+  ]
+}

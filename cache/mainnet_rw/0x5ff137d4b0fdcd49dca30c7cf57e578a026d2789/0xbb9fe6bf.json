@@ -1,0 +1,14 @@
+{
+  "reads": [
+    {
+      "account": "msg.sender",
+      "field": "stakes"
+    }
+  ],
+  "writes": [
+    {
+      "account": "msg.sender",
+      "field": "stakes"
+    }
+  ]
+}

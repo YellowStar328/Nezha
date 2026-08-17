@@ -1,0 +1,32 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "WETH"
+    },
+    {
+      "account": "global",
+      "field": "factory"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "WETH"
+    },
+    {
+      "account": "addr1",
+      "field": "balances"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x18cbafe5"
+    }
+  ]
+}

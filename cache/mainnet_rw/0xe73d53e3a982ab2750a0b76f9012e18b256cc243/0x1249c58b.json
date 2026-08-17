@@ -1,0 +1,54 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "totalSupply"
+    },
+    {
+      "account": "global",
+      "field": "lastMintingBlock"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "global",
+      "field": "nextDoublingBlock"
+    },
+    {
+      "account": "global",
+      "field": "lastDoublingBlock"
+    },
+    {
+      "account": "msg.sender",
+      "field": "balanceOf"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "totalSupply"
+    },
+    {
+      "account": "global",
+      "field": "lastMintingBlock"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "global",
+      "field": "nextDoublingBlock"
+    },
+    {
+      "account": "global",
+      "field": "lastDoublingBlock"
+    },
+    {
+      "account": "msg.sender",
+      "field": "balanceOf"
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "deposits"
+    },
+    {
+      "account": "global",
+      "field": "nonceSequenceNumber"
+    },
+    {
+      "account": "global",
+      "field": "senderCreator"
+    },
+    {
+      "account": "global",
+      "field": "INNER_GAS_OVERHEAD"
+    },
+    {
+      "account": "global",
+      "field": "PENALTY_PERCENT"
+    },
+    {
+      "account": "global",
+      "field": "REVERT_REASON_MAX_LEN"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "deposits"
+    },
+    {
+      "account": "global",
+      "field": "nonceSequenceNumber"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+      "function": "0x1fad948c"
+    },
+    {
+      "contract": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+      "function": "0x0b0f8f6a"
+    },
+    {
+      "contract": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+      "function": "0x35567e1a"
+    },
+    {
+      "contract": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+      "function": "0x0b0f8f6a"
+    }
+  ]
+}

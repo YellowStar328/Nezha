@@ -1,0 +1,18 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "locked"
+    },
+    {
+      "account": "global",
+      "field": "owner"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "locked"
+    }
+  ]
+}

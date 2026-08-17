@@ -1,0 +1,30 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "basisPointsRate"
+    },
+    {
+      "account": "global",
+      "field": "maximumFee"
+    },
+    {
+      "account": "global",
+      "field": "decimals"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "basisPointsRate"
+    },
+    {
+      "account": "global",
+      "field": "maximumFee"
+    }
+  ]
+}

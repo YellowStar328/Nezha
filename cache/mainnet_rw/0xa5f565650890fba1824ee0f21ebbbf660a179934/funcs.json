@@ -1,0 +1,22 @@
+[
+  {
+    "selector": "0xd948d468",
+    "name": "forward",
+    "inputs": [
+      {
+        "name": "data",
+        "type": "bytes"
+      }
+    ]
+  },
+  {
+    "selector": "0x8df0e34a",
+    "name": "makeCalls",
+    "inputs": [
+      {
+        "name": "calls",
+        "type": "tuple[]"
+      }
+    ]
+  }
+]

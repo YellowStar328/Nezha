@@ -1,0 +1,23 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "deprecated"
+    },
+    {
+      "account": "global",
+      "field": "upgradedAddress"
+    },
+    {
+      "account": "global",
+      "field": "_totalSupply"
+    }
+  ],
+  "writes": [],
+  "crossCalls": [
+    {
+      "contract": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "function": "0x18160ddd"
+    }
+  ]
+}

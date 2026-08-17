@@ -1,0 +1,28 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "locked"
+    },
+    {
+      "account": "global",
+      "field": "locker"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "locked"
+    },
+    {
+      "account": "global",
+      "field": "locker"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+      "function": "0x24856bc3"
+    }
+  ]
+}

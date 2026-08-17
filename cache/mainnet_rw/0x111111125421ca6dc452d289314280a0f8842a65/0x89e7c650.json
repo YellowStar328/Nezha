@@ -1,0 +1,26 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "_bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "_remainingInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "_epochManager"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "_bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "_remainingInvalidator"
+    }
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "allowed"
+    },
+    {
+      "account": "msg.sender",
+      "field": "allowed"
+    },
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "addr2",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "basisPointsRate"
+    },
+    {
+      "account": "global",
+      "field": "maximumFee"
+    },
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "owner",
+      "field": "balances"
+    },
+    {
+      "account": "addr1",
+      "field": "isBlackListed"
+    },
+    {
+      "account": "global",
+      "field": "deprecated"
+    },
+    {
+      "account": "global",
+      "field": "upgradedAddress"
+    },
+    {
+      "account": "global",
+      "field": "decimals"
+    },
+    {
+      "account": "global",
+      "field": "paused"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "allowed"
+    },
+    {
+      "account": "msg.sender",
+      "field": "allowed"
+    },
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "addr2",
+      "field": "balances"
+    },
+    {
+      "account": "owner",
+      "field": "balances"
+    }
+  ],
+  "crossCalls": []
+}

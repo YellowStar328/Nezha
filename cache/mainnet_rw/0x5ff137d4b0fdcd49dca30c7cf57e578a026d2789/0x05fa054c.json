@@ -1,0 +1,64 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "deposits"
+    },
+    {
+      "account": "global",
+      "field": "nonceSequenceNumber"
+    },
+    {
+      "account": "global",
+      "field": "senderCreator"
+    },
+    {
+      "account": "global",
+      "field": "SIG_VALIDATION_FAILED"
+    },
+    {
+      "account": "global",
+      "field": "INNER_OUT_OF_GAS"
+    },
+    {
+      "account": "global",
+      "field": "REVERT_REASON_MAX_LEN"
+    },
+    {
+      "account": "global",
+      "field": "SIMULATE_FIND_AGGREGATOR"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "deposits"
+    },
+    {
+      "account": "global",
+      "field": "nonceSequenceNumber"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x1c4405e3"
+    },
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x522a6814"
+    },
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x35567e1a"
+    },
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x765e7f0e"
+    },
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x1c4405e3"
+    }
+  ]
+}

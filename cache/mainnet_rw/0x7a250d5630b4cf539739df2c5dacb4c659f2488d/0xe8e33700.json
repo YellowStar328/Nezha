@@ -1,0 +1,60 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "factory"
+    },
+    {
+      "account": "global",
+      "field": "WETH"
+    },
+    {
+      "account": "addr1",
+      "field": "allowance"
+    },
+    {
+      "account": "addr2",
+      "field": "allowance"
+    },
+    {
+      "account": "addr1",
+      "field": "balanceOf"
+    },
+    {
+      "account": "addr2",
+      "field": "balanceOf"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "allowance"
+    },
+    {
+      "account": "addr2",
+      "field": "allowance"
+    },
+    {
+      "account": "addr1",
+      "field": "balanceOf"
+    },
+    {
+      "account": "addr2",
+      "field": "balanceOf"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+      "function": "0xe8e33700"
+    },
+    {
+      "contract": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+      "function": "0x0902f1ac"
+    },
+    {
+      "contract": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+      "function": "0x6a627842"
+    }
+  ]
+}

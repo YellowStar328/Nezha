@@ -1,0 +1,82 @@
+[
+  {
+    "selector": "0x817122dc",
+    "name": "V3_POSITION_MANAGER",
+    "inputs": []
+  },
+  {
+    "selector": "0xd0c9f6cb",
+    "name": "V4_POSITION_MANAGER",
+    "inputs": []
+  },
+  {
+    "selector": "0x24856bc3",
+    "name": "execute",
+    "inputs": [
+      {
+        "name": "commands",
+        "type": "bytes"
+      },
+      {
+        "name": "inputs",
+        "type": "bytes[]"
+      }
+    ]
+  },
+  {
+    "selector": "0x3593564c",
+    "name": "execute",
+    "inputs": [
+      {
+        "name": "commands",
+        "type": "bytes"
+      },
+      {
+        "name": "inputs",
+        "type": "bytes[]"
+      },
+      {
+        "name": "deadline",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "selector": "0xd737d0c7",
+    "name": "msgSender",
+    "inputs": []
+  },
+  {
+    "selector": "0xdc4c90d3",
+    "name": "poolManager",
+    "inputs": []
+  },
+  {
+    "selector": "0xfa461e33",
+    "name": "uniswapV3SwapCallback",
+    "inputs": [
+      {
+        "name": "amount0Delta",
+        "type": "int256"
+      },
+      {
+        "name": "amount1Delta",
+        "type": "int256"
+      },
+      {
+        "name": "data",
+        "type": "bytes"
+      }
+    ]
+  },
+  {
+    "selector": "0x91dd7346",
+    "name": "unlockCallback",
+    "inputs": [
+      {
+        "name": "data",
+        "type": "bytes"
+      }
+    ]
+  }
+]

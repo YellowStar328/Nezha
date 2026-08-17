@@ -1,0 +1,19 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "paused"
+    }
+  ],
+  "writes": [],
+  "crossCalls": [
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x8770ba91"
+    }
+  ]
+}

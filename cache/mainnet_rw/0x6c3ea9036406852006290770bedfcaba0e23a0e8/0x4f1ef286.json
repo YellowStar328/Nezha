@@ -1,0 +1,18 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "admin"
+    },
+    {
+      "account": "global",
+      "field": "implementation"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "implementation"
+    }
+  ]
+}

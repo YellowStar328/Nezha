@@ -1,0 +1,26 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "deprecated"
+    },
+    {
+      "account": "global",
+      "field": "upgradedAddress"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "deprecated"
+    },
+    {
+      "account": "global",
+      "field": "upgradedAddress"
+    }
+  ]
+}

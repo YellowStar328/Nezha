@@ -1,0 +1,36 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "allowance"
+    },
+    {
+      "account": "addr2",
+      "field": "allowance"
+    },
+    {
+      "account": "global",
+      "field": "factory"
+    },
+    {
+      "account": "global",
+      "field": "WETH"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "allowance"
+    },
+    {
+      "account": "addr2",
+      "field": "allowance"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x2195995c"
+    }
+  ]
+}

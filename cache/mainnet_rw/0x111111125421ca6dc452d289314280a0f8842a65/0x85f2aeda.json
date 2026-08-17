@@ -1,0 +1,56 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "paused"
+    },
+    {
+      "account": "global",
+      "field": "bitInvalidatorForOrder"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidatorForOrder"
+    },
+    {
+      "account": "global",
+      "field": "rawRemainingInvalidatorForOrder"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "global",
+      "field": "eip712Domain"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "bitInvalidatorForOrder"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidatorForOrder"
+    },
+    {
+      "account": "global",
+      "field": "rawRemainingInvalidatorForOrder"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x85f2aeda"
+    }
+  ]
+}

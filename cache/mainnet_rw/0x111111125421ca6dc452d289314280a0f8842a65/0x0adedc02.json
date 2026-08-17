@@ -1,0 +1,48 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "_nameFallback"
+    },
+    {
+      "account": "global",
+      "field": "_versionFallback"
+    },
+    {
+      "account": "global",
+      "field": "_owner"
+    },
+    {
+      "account": "global",
+      "field": "_paused"
+    },
+    {
+      "account": "global",
+      "field": "_epochs"
+    },
+    {
+      "account": "global",
+      "field": "_bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "_remainingInvalidator"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "_bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "_remainingInvalidator"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x0adedc02"
+    }
+  ]
+}

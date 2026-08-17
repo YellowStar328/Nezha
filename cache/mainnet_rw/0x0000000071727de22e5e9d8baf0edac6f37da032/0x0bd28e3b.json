@@ -1,0 +1,14 @@
+{
+  "reads": [
+    {
+      "account": "msg.sender",
+      "field": "nonceSequenceNumber"
+    }
+  ],
+  "writes": [
+    {
+      "account": "msg.sender",
+      "field": "nonceSequenceNumber"
+    }
+  ]
+}

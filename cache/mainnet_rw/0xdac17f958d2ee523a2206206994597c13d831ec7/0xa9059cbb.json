@@ -1,0 +1,58 @@
+{
+  "reads": [
+    {
+      "account": "msg.sender",
+      "field": "balances"
+    },
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "paused"
+    },
+    {
+      "account": "msg.sender",
+      "field": "isBlackListed"
+    },
+    {
+      "account": "global",
+      "field": "deprecated"
+    },
+    {
+      "account": "global",
+      "field": "upgradedAddress"
+    },
+    {
+      "account": "global",
+      "field": "basisPointsRate"
+    },
+    {
+      "account": "global",
+      "field": "maximumFee"
+    },
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "decimals"
+    }
+  ],
+  "writes": [
+    {
+      "account": "msg.sender",
+      "field": "balances"
+    },
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "owner"
+    }
+  ]
+}

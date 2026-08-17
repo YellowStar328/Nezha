@@ -1,0 +1,11 @@
+{
+  "address": "0x699f088b5dddcafb7c4824db5b10b57b37cb0c66",
+  "contract_name": "ERC1967Proxy",
+  "compiler_version": "0.8.28+commit.7893614a",
+  "verified": true,
+  "proxy": "EIP1967Proxy",
+  "implementation": "",
+  "optimization_used": "1",
+  "runs": "200",
+  "source": "sourcify"
+}

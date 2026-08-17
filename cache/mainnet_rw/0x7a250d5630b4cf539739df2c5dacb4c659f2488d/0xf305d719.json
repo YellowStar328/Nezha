@@ -1,0 +1,84 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "factory"
+    },
+    {
+      "account": "global",
+      "field": "WETH"
+    },
+    {
+      "account": "addr1",
+      "field": "allowance"
+    },
+    {
+      "account": "addr1",
+      "field": "balanceOf"
+    },
+    {
+      "account": "global",
+      "field": "pair"
+    },
+    {
+      "account": "global",
+      "field": "reserve0"
+    },
+    {
+      "account": "global",
+      "field": "reserve1"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "allowance"
+    },
+    {
+      "account": "addr1",
+      "field": "balanceOf"
+    },
+    {
+      "account": "global",
+      "field": "pair"
+    },
+    {
+      "account": "global",
+      "field": "reserve0"
+    },
+    {
+      "account": "global",
+      "field": "reserve1"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+      "function": "0xe6a43905"
+    },
+    {
+      "contract": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+      "function": "0xc9c65396"
+    },
+    {
+      "contract": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+      "function": "0x0902f1ac"
+    },
+    {
+      "contract": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+      "function": "0x6a627842"
+    },
+    {
+      "contract": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+      "function": "0x23b872dd"
+    },
+    {
+      "contract": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+      "function": "0xa9059cbb"
+    },
+    {
+      "contract": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+      "function": "0xd0e30db0"
+    }
+  ]
+}

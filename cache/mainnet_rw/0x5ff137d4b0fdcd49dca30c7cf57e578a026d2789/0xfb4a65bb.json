@@ -1,0 +1,56 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "deposits"
+    },
+    {
+      "account": "global",
+      "field": "nonceSequenceNumber"
+    },
+    {
+      "account": "global",
+      "field": "senderCreator"
+    },
+    {
+      "account": "global",
+      "field": "SIG_VALIDATION_FAILED"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "deposits"
+    },
+    {
+      "account": "global",
+      "field": "nonceSequenceNumber"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0xfb4a65bb"
+    },
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x1b2e6b8b"
+    },
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x4b1e7ef5"
+    },
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x35567e1a"
+    },
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x70a08231"
+    },
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x0b1d4e1a"
+    }
+  ]
+}

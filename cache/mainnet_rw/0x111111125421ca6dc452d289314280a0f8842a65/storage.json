@@ -1,0 +1,135 @@
+{
+  "storage": [
+    {
+      "astId": 5328,
+      "contract": "sources/source_tmp.sol:AggregationRouterV6",
+      "label": "_nameFallback",
+      "offset": 0,
+      "slot": "0",
+      "type": "t_string_storage"
+    },
+    {
+      "astId": 5330,
+      "contract": "sources/source_tmp.sol:AggregationRouterV6",
+      "label": "_versionFallback",
+      "offset": 0,
+      "slot": "1",
+      "type": "t_string_storage"
+    },
+    {
+      "astId": 2285,
+      "contract": "sources/source_tmp.sol:AggregationRouterV6",
+      "label": "_epochs",
+      "offset": 0,
+      "slot": "2",
+      "type": "t_mapping(t_uint256,t_uint256)"
+    },
+    {
+      "astId": 7835,
+      "contract": "sources/source_tmp.sol:AggregationRouterV6",
+      "label": "_owner",
+      "offset": 0,
+      "slot": "3",
+      "type": "t_address"
+    },
+    {
+      "astId": 5551,
+      "contract": "sources/source_tmp.sol:AggregationRouterV6",
+      "label": "_paused",
+      "offset": 20,
+      "slot": "3",
+      "type": "t_bool"
+    },
+    {
+      "astId": 5717,
+      "contract": "sources/source_tmp.sol:AggregationRouterV6",
+      "label": "_bitInvalidator",
+      "offset": 0,
+      "slot": "4",
+      "type": "t_mapping(t_address,t_struct(Data)2421_storage)"
+    },
+    {
+      "astId": 5724,
+      "contract": "sources/source_tmp.sol:AggregationRouterV6",
+      "label": "_remainingInvalidator",
+      "offset": 0,
+      "slot": "5",
+      "type": "t_mapping(t_address,t_mapping(t_bytes32,t_userDefinedValueType(RemainingInvalidator)2552))"
+    }
+  ],
+  "types": {
+    "t_address": {
+      "encoding": "inplace",
+      "label": "address",
+      "numberOfBytes": "20"
+    },
+    "t_bool": {
+      "encoding": "inplace",
+      "label": "bool",
+      "numberOfBytes": "1"
+    },
+    "t_bytes32": {
+      "encoding": "inplace",
+      "label": "bytes32",
+      "numberOfBytes": "32"
+    },
+    "t_mapping(t_address,t_mapping(t_bytes32,t_userDefinedValueType(RemainingInvalidator)2552))": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => mapping(bytes32 => RemainingInvalidator))",
+      "numberOfBytes": "32",
+      "value": "t_mapping(t_bytes32,t_userDefinedValueType(RemainingInvalidator)2552)"
+    },
+    "t_mapping(t_address,t_struct(Data)2421_storage)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => struct BitInvalidatorLib.Data)",
+      "numberOfBytes": "32",
+      "value": "t_struct(Data)2421_storage"
+    },
+    "t_mapping(t_bytes32,t_userDefinedValueType(RemainingInvalidator)2552)": {
+      "encoding": "mapping",
+      "key": "t_bytes32",
+      "label": "mapping(bytes32 => RemainingInvalidator)",
+      "numberOfBytes": "32",
+      "value": "t_userDefinedValueType(RemainingInvalidator)2552"
+    },
+    "t_mapping(t_uint256,t_uint256)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "label": "mapping(uint256 => uint256)",
+      "numberOfBytes": "32",
+      "value": "t_uint256"
+    },
+    "t_string_storage": {
+      "encoding": "bytes",
+      "label": "string",
+      "numberOfBytes": "32"
+    },
+    "t_struct(Data)2421_storage": {
+      "encoding": "inplace",
+      "label": "struct BitInvalidatorLib.Data",
+      "members": [
+        {
+          "astId": 2420,
+          "contract": "sources/source_tmp.sol:AggregationRouterV6",
+          "label": "_raw",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_mapping(t_uint256,t_uint256)"
+        }
+      ],
+      "numberOfBytes": "32"
+    },
+    "t_uint256": {
+      "encoding": "inplace",
+      "label": "uint256",
+      "numberOfBytes": "32"
+    },
+    "t_userDefinedValueType(RemainingInvalidator)2552": {
+      "encoding": "inplace",
+      "label": "RemainingInvalidator",
+      "numberOfBytes": "32"
+    }
+  }
+}

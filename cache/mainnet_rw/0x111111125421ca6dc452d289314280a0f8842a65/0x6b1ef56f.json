@@ -1,0 +1,72 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "paused"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "addr2",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidator"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "paused"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "addr2",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidator"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x6b1ef56f"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x6b1ef56f"
+    }
+  ]
+}

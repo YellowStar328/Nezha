@@ -50,11 +50,11 @@ type LLMConfig struct {
 }
 
 var llmConfig = LLMConfig{
-	APIEndpoint: "https://api.deepseek.com/chat/completions",
-	APIKey:      "sk-4f1ea5af9bf64cb9acee837bd2fd33e8",
-	MaxRetries:  3,
-	Timeout:     30 * time.Second,
-	Concurrency: 5,
+	APIEndpoint: "https://developer.amd.com.cn/radeon/api/v1/chat/completions",
+	APIKey:      "rc-e8fe1d82122e04c4fd1d6de8dd79ab2a9d9f6a441565df73",
+	MaxRetries:  4,
+	Timeout:     180 * time.Second,
+	Concurrency: 1, // AMD Radeon free tier: 20 RPM, $1/day. Stay well below the RPM cap.
 }
 
 func SetLLMConfig(config LLMConfig) {
@@ -101,6 +101,13 @@ func loadLLMCacheFromFile(contractName, functionName string) (*LLMResponse, erro
 }
 
 var ErrNotPreAnalyzed = fmt.Errorf("function not pre-analyzed")
+
+// ErrUnresolvableAccount signals that the LLM cache contains an access whose
+// account is a global-variable-name-as-key (e.g. {"account":"owner",...}),
+// which requires the runtime value of that variable to compute the concrete
+// slot key. Static analysis cannot resolve it; the caller should fall back to
+// EVM PreExecute for this tx.
+var ErrUnresolvableAccount = fmt.Errorf("unresolvable account (global-var-as-key) requires EVM fallback")
 
 func buildLLMPrompt(contractName, functionName string) string {
 	cm := GetContractManager()
@@ -188,9 +195,27 @@ func buildLLMPrompt(contractName, functionName string) string {
 	return prompt
 }
 
+// backoffFor returns a retry delay for the given 0-based retry attempt.
+// Rate-limit (429) responses use a longer schedule so we stay under the
+// provider's per-minute request budget (e.g. AMD Radeon free: 20 RPM).
+func backoffFor(retry int, isRateLimit bool) time.Duration {
+	base := 3 * time.Second
+	if isRateLimit {
+		base = 10 * time.Second
+	}
+	d := base
+	for i := 0; i < retry; i++ {
+		d *= 2
+		if d > 2*time.Minute {
+			return 2 * time.Minute
+		}
+	}
+	return d
+}
+
 func callLLM(prompt string) (*LLMResponse, error) {
 	reqBody := map[string]interface{}{
-		"model": "deepseek-v4-flash",
+		"model": "DeepSeek-V4-Flash",
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
@@ -229,65 +254,166 @@ func callLLM(prompt string) (*LLMResponse, error) {
 	for retry := 0; retry < llmConfig.MaxRetries; retry++ {
 		resp, err = client.Do(req)
 		if err != nil {
-			time.Sleep(time.Duration(retry+1) * 2 * time.Second)
-			continue
+			if retry+1 < llmConfig.MaxRetries {
+				time.Sleep(backoffFor(retry, false))
+				continue
+			}
+			return nil, fmt.Errorf("LLM request failed: %w", err)
 		}
 
 		respBody, err = ioutil.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			time.Sleep(time.Duration(retry+1) * 2 * time.Second)
+			if retry+1 < llmConfig.MaxRetries {
+				time.Sleep(backoffFor(retry, false))
+				continue
+			}
+			return nil, fmt.Errorf("LLM response read failed: %w", err)
+		}
+
+		// Dashscope compatible-mode v1 sometimes returns transient 404 / 5xx
+		// under load; 429 needs backoff. Treat all of them as retryable.
+		// 408 (timeout) and 425 (too early) are also transient.
+		if resp.StatusCode == http.StatusTooManyRequests ||
+			resp.StatusCode >= 500 ||
+			resp.StatusCode == http.StatusNotFound ||
+			resp.StatusCode == http.StatusRequestTimeout ||
+			resp.StatusCode == 425 {
+			time.Sleep(backoffFor(retry, resp.StatusCode == http.StatusTooManyRequests))
 			continue
 		}
 
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			time.Sleep(time.Duration(retry+1) * 2 * time.Second)
-			continue
-		}
-
+		// Move response parsing inside the retry loop. Sometimes the LLM returns
+		// malformed JSON or leaves content empty while writing the actual JSON
+		// into reasoning_content; retrying usually fixes it.
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("LLM request failed with status %d: %s", resp.StatusCode, string(respBody))
+			if retry+1 < llmConfig.MaxRetries {
+				time.Sleep(backoffFor(retry, false))
+				continue
+			}
+			return nil, fmt.Errorf("LLM request failed with status %d: %s", resp.StatusCode, truncateBytes(respBody, 400))
 		}
 
-		break
+		var result struct {
+			Choices []struct {
+				Message struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if jerr := json.Unmarshal(respBody, &result); jerr != nil {
+			if retry+1 < llmConfig.MaxRetries {
+				time.Sleep(backoffFor(retry, false))
+				continue
+			}
+			return nil, fmt.Errorf("LLM response envelope: %w, raw: %s", jerr, truncateBytes(respBody, 500))
+		}
+		if len(result.Choices) == 0 {
+			if retry+1 < llmConfig.MaxRetries {
+				time.Sleep(backoffFor(retry, false))
+				continue
+			}
+			return nil, fmt.Errorf("LLM returned no choices")
+		}
+
+		content := strings.TrimSpace(result.Choices[0].Message.Content)
+		// deepseek-v4-flash often returns reasoning as JSON in reasoning_content
+		// while leaving content as "", so fall back before erroring.
+		if content == "" {
+			content = strings.TrimSpace(result.Choices[0].Message.ReasoningContent)
+		}
+		if content == "" {
+			if retry+1 < llmConfig.MaxRetries {
+				time.Sleep(backoffFor(retry, false))
+				continue
+			}
+			return nil, fmt.Errorf("LLM returned empty content and empty reasoning_content")
+		}
+
+		// Strip markdown fences ```json ... ``` with any trailing text.
+		content = stripMarkdownJSONFence(content)
+
+		var llmResp LLMResponse
+		if jerr := json.Unmarshal([]byte(content), &llmResp); jerr != nil {
+			if retry+1 < llmConfig.MaxRetries {
+				time.Sleep(backoffFor(retry, false))
+				continue
+			}
+			return nil, fmt.Errorf("failed to parse LLM response JSON: %w, content: %s", jerr, truncateStr(content, 800))
+		}
+
+		return &llmResp, nil
 	}
 
-	if err != nil {
-		return nil, err
-	}
+	return nil, fmt.Errorf("LLM request failed after %d retries", llmConfig.MaxRetries)
+}
 
-	var result struct {
-		Choices []struct {
-			Message struct {
-				Content          string `json:"content"`
-				ReasoningContent string `json:"reasoning_content"`
-			} `json:"message"`
-		} `json:"choices"`
+// truncateStr returns s truncated to at most n runes, appending "..." if truncated.
+func truncateStr(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
 	}
+	return string(r[:n]) + "..."
+}
 
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, err
+// truncateBytes truncates raw bytes for safe logging (avoid invalid UTF in error).
+func truncateBytes(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
 	}
+	return string(b[:n]) + "..."
+}
 
-	if len(result.Choices) == 0 {
-		return nil, fmt.Errorf("LLM returned no choices")
-	}
-
-	content := strings.TrimSpace(result.Choices[0].Message.Content)
-	if content == "" {
-		content = strings.TrimSpace(result.Choices[0].Message.ReasoningContent)
-	}
-
-	content = strings.TrimPrefix(content, "```json")
-	content = strings.TrimSuffix(content, "```")
+// stripMarkdownJSONFence removes ```json ... ``` markdown wrappers, including
+// any leading text before the fence (e.g. deepseek reasoning preamble) and
+// any trailing text after the closing fence.
+func stripMarkdownJSONFence(content string) string {
+	orig := content
 	content = strings.TrimSpace(content)
 
-	var llmResp LLMResponse
-	if err := json.Unmarshal([]byte(content), &llmResp); err != nil {
-		return nil, fmt.Errorf("failed to parse LLM response: %v, content: %s", err, content)
+	// Case 1: explicit ```json ... ``` block
+	if idx := strings.Index(content, "```json"); idx >= 0 {
+		rest := content[idx+len("```json"):]
+		if end := strings.Index(rest, "```"); end >= 0 {
+			content = strings.TrimSpace(rest[:end])
+		} else {
+			content = strings.TrimSpace(rest)
+		}
+		return content
 	}
 
-	return &llmResp, nil
+	// Case 2: fence without "json" tag: ``` ... ```
+	if idx := strings.Index(content, "```"); idx >= 0 {
+		rest := content[idx+3:]
+		// Sometimes the first line is "json" on its own. Skip that line.
+		rest = strings.TrimSpace(rest)
+		if strings.HasPrefix(strings.ToLower(rest), "json\n") ||
+			strings.HasPrefix(strings.ToLower(rest), "json\r\n") {
+			rest = rest[4:] // after "json"
+			for len(rest) > 0 && (rest[0] == '\n' || rest[0] == '\r') {
+				rest = rest[1:]
+			}
+		}
+		if end := strings.Index(rest, "```"); end >= 0 {
+			content = strings.TrimSpace(rest[:end])
+		} else {
+			content = strings.TrimSpace(rest)
+		}
+		return content
+	}
+
+	// Case 3: no fence, but content has leading text before a JSON object
+	// LLM reasoning models sometimes say "好的我返回如下JSON..." then print
+	// the JSON. Find first '{' and last '}' and return that slice.
+	start := strings.Index(content, "{")
+	end := strings.LastIndex(content, "}")
+	if start >= 0 && end > start {
+		return content[start : end+1]
+	}
+
+	return orig
 }
 
 func PreAnalyzeContract(pairs []ContractFunctionPair) error {

@@ -1,0 +1,9 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "nonceSequenceNumber"
+    }
+  ],
+  "writes": []
+}

@@ -1,0 +1,22 @@
+{
+  "reads": [
+    {
+      "account": "opInfo.mUserOp.sender",
+      "field": "deposits"
+    },
+    {
+      "account": "opInfo.mUserOp.paymaster",
+      "field": "deposits"
+    }
+  ],
+  "writes": [
+    {
+      "account": "opInfo.mUserOp.sender",
+      "field": "deposits"
+    },
+    {
+      "account": "opInfo.mUserOp.paymaster",
+      "field": "deposits"
+    }
+  ]
+}

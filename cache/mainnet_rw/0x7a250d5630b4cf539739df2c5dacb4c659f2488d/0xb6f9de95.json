@@ -1,0 +1,56 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "WETH"
+    },
+    {
+      "account": "global",
+      "field": "factory"
+    },
+    {
+      "account": "addr1",
+      "field": "balanceOf"
+    },
+    {
+      "account": "global",
+      "field": "pairFor"
+    },
+    {
+      "account": "global",
+      "field": "getReserves"
+    },
+    {
+      "account": "global",
+      "field": "balanceOf"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "WETH"
+    },
+    {
+      "account": "global",
+      "field": "pairFor"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "function": "0xd0e30db0"
+    },
+    {
+      "contract": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "function": "0xa9059cbb"
+    },
+    {
+      "contract": "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f",
+      "function": "0x0902f1ac"
+    },
+    {
+      "contract": "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f",
+      "function": "0x022c0d9f"
+    }
+  ]
+}

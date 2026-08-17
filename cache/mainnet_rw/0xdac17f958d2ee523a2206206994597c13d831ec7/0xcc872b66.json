@@ -1,0 +1,26 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "_totalSupply"
+    },
+    {
+      "account": "global",
+      "field": "balances"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "_totalSupply"
+    }
+  ]
+}

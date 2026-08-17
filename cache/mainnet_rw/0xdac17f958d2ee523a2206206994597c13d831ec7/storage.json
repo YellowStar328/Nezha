@@ -1,0 +1,26 @@
+{
+  "storage": [
+    {"astId": 43, "contract": "source.sol:TetherToken", "label": "owner", "offset": 0, "slot": "0", "type": "t_address"},
+    {"astId": 79, "contract": "source.sol:TetherToken", "label": "_totalSupply", "offset": 0, "slot": "1", "type": "t_uint256"},
+    {"astId": 104, "contract": "source.sol:TetherToken", "label": "balances", "offset": 0, "slot": "2", "type": "t_mapping(t_address,t_uint256)"},
+    {"astId": 107, "contract": "source.sol:TetherToken", "label": "basisPointsRate", "offset": 0, "slot": "3", "type": "t_uint256"},
+    {"astId": 108, "contract": "source.sol:TetherToken", "label": "maximumFee", "offset": 0, "slot": "4", "type": "t_uint256"},
+    {"astId": 158, "contract": "source.sol:TetherToken", "label": "allowed", "offset": 0, "slot": "5", "type": "t_mapping(t_address,t_mapping(t_address,t_uint256))"},
+    {"astId": 276, "contract": "source.sol:TetherToken", "label": "isBlackListed", "offset": 0, "slot": "6", "type": "t_mapping(t_address,t_bool)"},
+    {"astId": 229, "contract": "source.sol:TetherToken", "label": "paused", "offset": 0, "slot": "7", "type": "t_bool"},
+    {"astId": 314, "contract": "source.sol:TetherToken", "label": "name", "offset": 0, "slot": "8", "type": "t_string_storage"},
+    {"astId": 315, "contract": "source.sol:TetherToken", "label": "symbol", "offset": 0, "slot": "9", "type": "t_string_storage"},
+    {"astId": 316, "contract": "source.sol:TetherToken", "label": "decimals", "offset": 0, "slot": "10", "type": "t_uint256"},
+    {"astId": 317, "contract": "source.sol:TetherToken", "label": "upgradedAddress", "offset": 0, "slot": "11", "type": "t_address"},
+    {"astId": 318, "contract": "source.sol:TetherToken", "label": "deprecated", "offset": 20, "slot": "11", "type": "t_bool"}
+  ],
+  "types": {
+    "t_address": {"encoding": "inplace", "label": "address", "numberOfBytes": "20"},
+    "t_bool": {"encoding": "inplace", "label": "bool", "numberOfBytes": "1"},
+    "t_uint256": {"encoding": "inplace", "label": "uint256", "numberOfBytes": "32"},
+    "t_string_storage": {"encoding": "bytes", "label": "string", "numberOfBytes": "32"},
+    "t_mapping(t_address,t_bool)": {"encoding": "mapping", "key": "t_address", "label": "mapping(address => bool)", "numberOfBytes": "32", "value": "t_bool"},
+    "t_mapping(t_address,t_uint256)": {"encoding": "mapping", "key": "t_address", "label": "mapping(address => uint256)", "numberOfBytes": "32", "value": "t_uint256"},
+    "t_mapping(t_address,t_mapping(t_address,t_uint256))": {"encoding": "mapping", "key": "t_address", "label": "mapping(address => mapping(address => uint256))", "numberOfBytes": "32", "value": "t_mapping(t_address,t_uint256)"}
+  }
+}

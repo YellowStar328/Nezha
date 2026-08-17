@@ -12,6 +12,15 @@ import (
 	"Nezha/core"
 )
 
+// RawTransaction holds the minimal tx fields needed for spec generation.
+type RawTransaction struct {
+	Hash  string `json:"hash"`
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Input string `json:"input"`
+	Value string `json:"value"`
+}
+
 // DatasetManifest mirrors eth-dataset-exporter's `manifest.json` so the
 // scheduler knows what block range is available locally.
 type DatasetManifest struct {
@@ -45,9 +54,10 @@ type DatasetReader struct {
 	dir      string
 	manifest DatasetManifest
 
-	mu     sync.RWMutex
-	cache  map[uint64]*core.ReplayBlock
-	dec    *zstd.Decoder
+	mu      sync.RWMutex
+	cache   map[uint64]*core.ReplayBlock
+	txCache map[uint64][]RawTransaction
+	dec     *zstd.Decoder
 }
 
 // NewDatasetReader opens a dataset directory and validates the manifest.
@@ -69,6 +79,7 @@ func NewDatasetReader(dir string) (*DatasetReader, error) {
 		dir:      dir,
 		manifest: m,
 		cache:    make(map[uint64]*core.ReplayBlock),
+		txCache:  make(map[uint64][]RawTransaction),
 		dec:      dec,
 	}, nil
 }
@@ -136,4 +147,49 @@ func (dr *DatasetReader) LoadBlock(blockNum uint64) (*core.ReplayBlock, error) {
 	}
 	dr.cache[blockNum] = blk
 	return blk, nil
+}
+
+// blockTxsRaw is the minimal JSON schema for parsing the "transactions" array
+// from a block dataset file, without decoding the full block.
+type blockTxsRaw struct {
+	Transactions []RawTransaction `json:"transactions"`
+}
+
+// LoadBlockTxs reads raw transaction data (to, input, hash) for a block.
+// This is used by the LLM spec executor to decode selectors and args.
+// The result is cached in txCache, mirroring LoadBlock's caching strategy.
+func (dr *DatasetReader) LoadBlockTxs(blockNum uint64) ([]RawTransaction, error) {
+	dr.mu.RLock()
+	if txs, ok := dr.txCache[blockNum]; ok {
+		dr.mu.RUnlock()
+		return txs, nil
+	}
+	dr.mu.RUnlock()
+
+	dr.mu.Lock()
+	defer dr.mu.Unlock()
+	// double-check after lock
+	if txs, ok := dr.txCache[blockNum]; ok {
+		return txs, nil
+	}
+	if blockNum < uint64(dr.manifest.FromBlock) || blockNum > uint64(dr.manifest.ToBlock) {
+		return nil, fmt.Errorf("block %d outside manifest [%d,%d]", blockNum, dr.manifest.FromBlock, dr.manifest.ToBlock)
+	}
+	p := filepath.Join(dr.dir, "blocks", fmt.Sprintf("%d.json.zst", blockNum))
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return nil, fmt.Errorf("open block %d: %w", blockNum, err)
+	}
+	decompressed, err := dr.dec.DecodeAll(raw, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decompress block %d: %w", blockNum, err)
+	}
+	var blk blockTxsRaw
+	if err := json.Unmarshal(decompressed, &blk); err != nil {
+		return nil, fmt.Errorf("parse block %d transactions: %w", blockNum, err)
+	}
+	txs := make([]RawTransaction, len(blk.Transactions))
+	copy(txs, blk.Transactions)
+	dr.txCache[blockNum] = txs
+	return txs, nil
 }

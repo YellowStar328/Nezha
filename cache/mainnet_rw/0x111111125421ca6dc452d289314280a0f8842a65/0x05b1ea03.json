@@ -1,0 +1,14 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    }
+  ]
+}

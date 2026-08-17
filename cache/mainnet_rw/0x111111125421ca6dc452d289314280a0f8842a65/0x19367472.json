@@ -1,0 +1,160 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "paused"
+    },
+    {
+      "account": "global",
+      "field": "nonce"
+    },
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "global",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "allowance"
+    },
+    {
+      "account": "global",
+      "field": "weth"
+    },
+    {
+      "account": "global",
+      "field": "uniswapV3Pool"
+    },
+    {
+      "account": "global",
+      "field": "uniswapV3Factory"
+    },
+    {
+      "account": "global",
+      "field": "uniswapV3SwapCallback"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "nonce"
+    },
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "global",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "allowance"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x19367472"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x0d3b5f0b"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x5c12e0b0"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x23b872dd"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x095ea7b3"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x022c0d9f"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x128acb08"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x1f1fcd51"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x4a25d94a"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x88316456"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0xfa461e33"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x5c12e0b0"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x23b872dd"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x095ea7b3"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x022c0d9f"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x128acb08"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x1f1fcd51"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x4a25d94a"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x88316456"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0xfa461e33"
+    }
+  ]
+}

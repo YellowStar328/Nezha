@@ -1,0 +1,11 @@
+{
+  "address": "0x7a250d5630b4cf539739df2c5dacb4c659f2488d",
+  "contract_name": "UniswapV2Router02",
+  "compiler_version": "0.6.6+commit.6c089d02",
+  "verified": true,
+  "proxy": "",
+  "implementation": "",
+  "optimization_used": "1",
+  "runs": "999999",
+  "source": "sourcify"
+}

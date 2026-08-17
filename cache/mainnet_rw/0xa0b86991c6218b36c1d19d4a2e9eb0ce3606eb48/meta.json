@@ -1,0 +1,11 @@
+{
+  "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+  "contract_name": "FiatTokenProxy",
+  "compiler_version": "0.4.24+commit.e67f0147",
+  "verified": true,
+  "proxy": "ZeppelinOSProxy",
+  "implementation": "",
+  "optimization_used": "0",
+  "runs": "200",
+  "source": "sourcify"
+}

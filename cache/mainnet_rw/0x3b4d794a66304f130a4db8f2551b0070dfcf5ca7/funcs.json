@@ -1,0 +1,56 @@
+[
+  {
+    "selector": "0x5a99719e",
+    "name": "getMaster",
+    "inputs": []
+  },
+  {
+    "selector": "0xf00e6a2a",
+    "name": "getTarget",
+    "inputs": []
+  },
+  {
+    "selector": "0x439fab91",
+    "name": "initialize",
+    "inputs": [
+      {
+        "name": "",
+        "type": "bytes"
+      }
+    ]
+  },
+  {
+    "selector": "0xc3f59687",
+    "name": "transferMastership",
+    "inputs": [
+      {
+        "name": "_newMaster",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x25394645",
+    "name": "upgrade",
+    "inputs": [
+      {
+        "name": "",
+        "type": "bytes"
+      }
+    ]
+  },
+  {
+    "selector": "0x6fc49140",
+    "name": "upgradeTarget",
+    "inputs": [
+      {
+        "name": "newTarget",
+        "type": "address"
+      },
+      {
+        "name": "newTargetUpgradeParameters",
+        "type": "bytes"
+      }
+    ]
+  }
+]

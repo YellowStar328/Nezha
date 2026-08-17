@@ -1,0 +1,9 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "V3_POSITION_MANAGER"
+    }
+  ],
+  "writes": []
+}

@@ -1,0 +1,88 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "paused"
+    },
+    {
+      "account": "global",
+      "field": "nonce"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidator"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "nonce"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidator"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x095ea7b3"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x23b872dd"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x2e1a7d4d"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x70a08231"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0xa9059cbb"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x095ea7b3"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x23b872dd"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x2e1a7d4d"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x70a08231"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0xa9059cbb"
+    }
+  ]
+}

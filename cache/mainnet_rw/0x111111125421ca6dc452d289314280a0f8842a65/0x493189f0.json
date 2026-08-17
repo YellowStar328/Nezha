@@ -1,0 +1,64 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "paused"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidator"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidator"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x493189f0"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x0b6b53d4"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x1a5da6c4"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x2e1a7d4d"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x095ea7b3"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x23b872dd"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0xa9059cbb"
+    }
+  ]
+}

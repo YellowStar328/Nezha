@@ -1,0 +1,11 @@
+{
+  "address": "0x66a9893cc07d91d95644aedd05d03f95e1dba8af",
+  "contract_name": "UniversalRouter",
+  "compiler_version": "0.8.26+commit.8a97fa7a",
+  "verified": true,
+  "proxy": "",
+  "implementation": "",
+  "optimization_used": "1",
+  "runs": "44444444",
+  "source": "sourcify"
+}

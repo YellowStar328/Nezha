@@ -1,0 +1,28 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "deposits"
+    },
+    {
+      "account": "global",
+      "field": "nonceSequenceNumber"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "deposits"
+    },
+    {
+      "account": "global",
+      "field": "nonceSequenceNumber"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+      "function": "0x36ab61cb"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "allowance"
+    },
+    {
+      "account": "addr1",
+      "field": "allowance"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "allowance"
+    },
+    {
+      "account": "addr1",
+      "field": "allowance"
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "locked"
+    },
+    {
+      "account": "global",
+      "field": "locker"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "locked"
+    },
+    {
+      "account": "global",
+      "field": "locker"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+      "function": "0x1fad948c"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0xbc80f1a8"
+    },
+    {
+      "contract": "0x3b4d794a66304f130a4db8f2551b0070dfcf5ca7",
+      "function": "0x4d44560d"
+    },
+    {
+      "contract": "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789",
+      "function": "0x1fad948c"
+    }
+  ]
+}

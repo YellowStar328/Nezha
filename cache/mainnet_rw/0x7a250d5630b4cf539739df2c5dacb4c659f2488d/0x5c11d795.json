@@ -1,0 +1,31 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "factory"
+    },
+    {
+      "account": "global",
+      "field": "WETH"
+    }
+  ],
+  "writes": [],
+  "crossCalls": [
+    {
+      "contract": "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f",
+      "function": "0x23b872dd"
+    },
+    {
+      "contract": "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f",
+      "function": "0x0902f1ac"
+    },
+    {
+      "contract": "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f",
+      "function": "0x022c0d9f"
+    }
+  ]
+}

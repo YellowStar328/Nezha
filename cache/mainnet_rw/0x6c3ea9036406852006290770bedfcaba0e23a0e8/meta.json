@@ -1,0 +1,11 @@
+{
+  "address": "0x6c3ea9036406852006290770bedfcaba0e23a0e8",
+  "contract_name": "AdminUpgradeabilityProxy",
+  "compiler_version": "0.4.24+commit.e67f0147",
+  "verified": true,
+  "proxy": "ZeppelinOSProxy",
+  "implementation": "",
+  "optimization_used": "1",
+  "runs": "200",
+  "source": "sourcify"
+}

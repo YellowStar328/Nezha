@@ -1,0 +1,11 @@
+{
+  "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+  "contract_name": "TetherToken",
+  "compiler_version": "0.4.18+commit.9cf6e910",
+  "verified": true,
+  "proxy": "",
+  "implementation": "",
+  "optimization_used": "0",
+  "runs": "",
+  "source": "sourcify"
+}

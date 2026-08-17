@@ -1,0 +1,27 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "_clipperExchange"
+    },
+    {
+      "account": "addr2",
+      "field": "_recipient"
+    },
+    {
+      "account": "global",
+      "field": "_paused"
+    },
+    {
+      "account": "global",
+      "field": "_clipperPermit"
+    }
+  ],
+  "writes": [],
+  "crossCalls": [
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x0c5a5c1a"
+    }
+  ]
+}

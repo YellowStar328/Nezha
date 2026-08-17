@@ -1,0 +1,22 @@
+{
+  "reads": [
+    {
+      "account": "msg.sender",
+      "field": "deposits.deposit"
+    },
+    {
+      "account": "msg.sender",
+      "field": "deposits.withdrawTime"
+    },
+    {
+      "account": "global",
+      "field": "unstakeDelaySec"
+    }
+  ],
+  "writes": [
+    {
+      "account": "msg.sender",
+      "field": "deposits.withdrawTime"
+    }
+  ]
+}

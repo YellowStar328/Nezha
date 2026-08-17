@@ -1,0 +1,92 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "owner"
+    },
+    {
+      "account": "global",
+      "field": "paused"
+    },
+    {
+      "account": "global",
+      "field": "nonce"
+    },
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "global",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "allowance"
+    },
+    {
+      "account": "global",
+      "field": "weth"
+    },
+    {
+      "account": "global",
+      "field": "uniswapV3Pool"
+    },
+    {
+      "account": "global",
+      "field": "uniswapV2Pair"
+    },
+    {
+      "account": "global",
+      "field": "curvePool"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "nonce"
+    },
+    {
+      "account": "global",
+      "field": "bitInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidator"
+    },
+    {
+      "account": "global",
+      "field": "epoch"
+    },
+    {
+      "account": "global",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "allowance"
+    }
+  ],
+  "crossCalls": [
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x0f449d71"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x0f449d71"
+    },
+    {
+      "contract": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "function": "0x0f449d71"
+    }
+  ]
+}

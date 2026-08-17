@@ -1,0 +1,9 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "totalSupply"
+    }
+  ],
+  "writes": []
+}

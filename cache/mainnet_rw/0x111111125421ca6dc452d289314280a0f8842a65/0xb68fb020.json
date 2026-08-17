@@ -1,0 +1,22 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "bitInvalidatorForOrder"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidatorForOrder"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "bitInvalidatorForOrder"
+    },
+    {
+      "account": "global",
+      "field": "remainingInvalidatorForOrder"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "0x10d6a54a4754c8869d6886b5f5d7fbfa5b4522237ea5c60d11bc4e7a1ff9390b"
+    }
+  ],
+  "writes": []
+}

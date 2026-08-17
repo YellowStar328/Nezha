@@ -1,0 +1,26 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "_totalSupply"
+    },
+    {
+      "account": "addr1",
+      "field": "isBlackListed"
+    }
+  ],
+  "writes": [
+    {
+      "account": "addr1",
+      "field": "balances"
+    },
+    {
+      "account": "global",
+      "field": "_totalSupply"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "reads": [
+    {
+      "account": "msg.sender",
+      "field": "allowed"
+    },
+    {
+      "account": "addr1",
+      "field": "allowed"
+    },
+    {
+      "account": "global",
+      "field": "deprecated"
+    }
+  ],
+  "writes": [
+    {
+      "account": "msg.sender",
+      "field": "allowed"
+    },
+    {
+      "account": "addr1",
+      "field": "allowed"
+    }
+  ]
+}

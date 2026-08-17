@@ -1,0 +1,275 @@
+[
+  {
+    "selector": "0x06fdde03",
+    "name": "name",
+    "inputs": []
+  },
+  {
+    "selector": "0x0753c30c",
+    "name": "deprecate",
+    "inputs": [
+      {
+        "name": "_upgradedAddress",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x095ea7b3",
+    "name": "approve",
+    "inputs": [
+      {
+        "name": "_spender",
+        "type": "address"
+      },
+      {
+        "name": "_value",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "selector": "0x0e136b19",
+    "name": "deprecated",
+    "inputs": []
+  },
+  {
+    "selector": "0x0ecb93c0",
+    "name": "addBlackList",
+    "inputs": [
+      {
+        "name": "_evilUser",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x18160ddd",
+    "name": "totalSupply",
+    "inputs": []
+  },
+  {
+    "selector": "0x23b872dd",
+    "name": "transferFrom",
+    "inputs": [
+      {
+        "name": "_from",
+        "type": "address"
+      },
+      {
+        "name": "_to",
+        "type": "address"
+      },
+      {
+        "name": "_value",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "selector": "0x26976e3f",
+    "name": "upgradedAddress",
+    "inputs": []
+  },
+  {
+    "selector": "0x27e235e3",
+    "name": "balances",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x313ce567",
+    "name": "decimals",
+    "inputs": []
+  },
+  {
+    "selector": "0x35390714",
+    "name": "maximumFee",
+    "inputs": []
+  },
+  {
+    "selector": "0x3eaaf86b",
+    "name": "_totalSupply",
+    "inputs": []
+  },
+  {
+    "selector": "0x3f4ba83a",
+    "name": "unpause",
+    "inputs": []
+  },
+  {
+    "selector": "0x59bf1abe",
+    "name": "getBlackListStatus",
+    "inputs": [
+      {
+        "name": "_maker",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x5c658165",
+    "name": "allowed",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address"
+      },
+      {
+        "name": "",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x5c975abb",
+    "name": "paused",
+    "inputs": []
+  },
+  {
+    "selector": "0x70a08231",
+    "name": "balanceOf",
+    "inputs": [
+      {
+        "name": "who",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x8456cb59",
+    "name": "pause",
+    "inputs": []
+  },
+  {
+    "selector": "0x893d20e8",
+    "name": "getOwner",
+    "inputs": []
+  },
+  {
+    "selector": "0x8da5cb5b",
+    "name": "owner",
+    "inputs": []
+  },
+  {
+    "selector": "0x95d89b41",
+    "name": "symbol",
+    "inputs": []
+  },
+  {
+    "selector": "0xa9059cbb",
+    "name": "transfer",
+    "inputs": [
+      {
+        "name": "_to",
+        "type": "address"
+      },
+      {
+        "name": "_value",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "selector": "0xc0324c77",
+    "name": "setParams",
+    "inputs": [
+      {
+        "name": "newBasisPoints",
+        "type": "uint256"
+      },
+      {
+        "name": "newMaxFee",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "selector": "0xcc872b66",
+    "name": "issue",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "selector": "0xdb006a75",
+    "name": "redeem",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "selector": "0xdd62ed3e",
+    "name": "allowance",
+    "inputs": [
+      {
+        "name": "_owner",
+        "type": "address"
+      },
+      {
+        "name": "_spender",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0xdd644f72",
+    "name": "basisPointsRate",
+    "inputs": []
+  },
+  {
+    "selector": "0xe47d6060",
+    "name": "isBlackListed",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0xe4997dc5",
+    "name": "removeBlackList",
+    "inputs": [
+      {
+        "name": "_clearedUser",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0xe5b5019a",
+    "name": "MAX_UINT",
+    "inputs": []
+  },
+  {
+    "selector": "0xf2fde38b",
+    "name": "transferOwnership",
+    "inputs": [
+      {
+        "name": "newOwner",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0xf3bdc228",
+    "name": "destroyBlackFunds",
+    "inputs": [
+      {
+        "name": "_blackListedUser",
+        "type": "address"
+      }
+    ]
+  }
+]

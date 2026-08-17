@@ -1,0 +1,13 @@
+{
+  "reads": [
+    {
+      "account": "addr1",
+      "field": "allowed"
+    },
+    {
+      "account": "addr2",
+      "field": "allowed"
+    }
+  ],
+  "writes": []
+}

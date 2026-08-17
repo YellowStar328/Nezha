@@ -1,0 +1,236 @@
+[
+  {
+    "selector": "0x8f41ec5a",
+    "name": "SIG_VALIDATION_FAILED",
+    "inputs": []
+  },
+  {
+    "selector": "0x957122ab",
+    "name": "_validateSenderAndPaymaster",
+    "inputs": [
+      {
+        "name": "initCode",
+        "type": "bytes"
+      },
+      {
+        "name": "sender",
+        "type": "address"
+      },
+      {
+        "name": "paymasterAndData",
+        "type": "bytes"
+      }
+    ]
+  },
+  {
+    "selector": "0x0396cb60",
+    "name": "addStake",
+    "inputs": [
+      {
+        "name": "unstakeDelaySec",
+        "type": "uint32"
+      }
+    ]
+  },
+  {
+    "selector": "0x70a08231",
+    "name": "balanceOf",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0xb760faf9",
+    "name": "depositTo",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0xfc7e286d",
+    "name": "deposits",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x5287ce12",
+    "name": "getDepositInfo",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x35567e1a",
+    "name": "getNonce",
+    "inputs": [
+      {
+        "name": "sender",
+        "type": "address"
+      },
+      {
+        "name": "key",
+        "type": "uint192"
+      }
+    ]
+  },
+  {
+    "selector": "0x9b249f69",
+    "name": "getSenderAddress",
+    "inputs": [
+      {
+        "name": "initCode",
+        "type": "bytes"
+      }
+    ]
+  },
+  {
+    "selector": "0x369b02f3",
+    "name": "getUserOpHash",
+    "inputs": [
+      {
+        "name": "userOp",
+        "type": "tuple"
+      }
+    ]
+  },
+  {
+    "selector": "0x58bc7094",
+    "name": "handleAggregatedOps",
+    "inputs": [
+      {
+        "name": "opsPerAggregator",
+        "type": "tuple[]"
+      },
+      {
+        "name": "beneficiary",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x05fa054c",
+    "name": "handleOps",
+    "inputs": [
+      {
+        "name": "ops",
+        "type": "tuple[]"
+      },
+      {
+        "name": "beneficiary",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x0bd28e3b",
+    "name": "incrementNonce",
+    "inputs": [
+      {
+        "name": "key",
+        "type": "uint192"
+      }
+    ]
+  },
+  {
+    "selector": "0x36ab61cb",
+    "name": "innerHandleOp",
+    "inputs": [
+      {
+        "name": "callData",
+        "type": "bytes"
+      },
+      {
+        "name": "opInfo",
+        "type": "tuple"
+      },
+      {
+        "name": "context",
+        "type": "bytes"
+      }
+    ]
+  },
+  {
+    "selector": "0x1b2e01b8",
+    "name": "nonceSequenceNumber",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address"
+      },
+      {
+        "name": "",
+        "type": "uint192"
+      }
+    ]
+  },
+  {
+    "selector": "0xd5b0f01d",
+    "name": "simulateHandleOp",
+    "inputs": [
+      {
+        "name": "op",
+        "type": "tuple"
+      },
+      {
+        "name": "target",
+        "type": "address"
+      },
+      {
+        "name": "targetCallData",
+        "type": "bytes"
+      }
+    ]
+  },
+  {
+    "selector": "0xfb4a65bb",
+    "name": "simulateValidation",
+    "inputs": [
+      {
+        "name": "userOp",
+        "type": "tuple"
+      }
+    ]
+  },
+  {
+    "selector": "0xbb9fe6bf",
+    "name": "unlockStake",
+    "inputs": []
+  },
+  {
+    "selector": "0xc23a5cea",
+    "name": "withdrawStake",
+    "inputs": [
+      {
+        "name": "withdrawAddress",
+        "type": "address"
+      }
+    ]
+  },
+  {
+    "selector": "0x205c2878",
+    "name": "withdrawTo",
+    "inputs": [
+      {
+        "name": "withdrawAddress",
+        "type": "address"
+      },
+      {
+        "name": "withdrawAmount",
+        "type": "uint256"
+      }
+    ]
+  }
+]

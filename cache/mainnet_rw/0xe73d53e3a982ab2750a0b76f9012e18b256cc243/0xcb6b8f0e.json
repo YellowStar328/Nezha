@@ -1,0 +1,14 @@
+{
+  "reads": [
+    {
+      "account": "global",
+      "field": "lastMintingBlock"
+    }
+  ],
+  "writes": [
+    {
+      "account": "global",
+      "field": "lastMintingBlock"
+    }
+  ]
+}

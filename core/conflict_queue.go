@@ -32,6 +32,9 @@ func CreateGraph(rwNodes [][]*RWNode) *QueueGraph {
 	var queues = make(map[string]*Queue)
 
 	for _, rw := range rwNodes {
+		if len(rw) == 0 {
+			continue
+		}
 		id := rw[0].TransInfo.ID
 		edge := &Edge{rw, false}
 		edges[id] = edge

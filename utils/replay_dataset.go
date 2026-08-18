@@ -155,6 +155,28 @@ type blockTxsRaw struct {
 	Transactions []RawTransaction `json:"transactions"`
 }
 
+// ReplayWitnessAccount mirrors the witness account schema stored in the block
+// dataset file. Defined here (in utils) so the root module can read witness
+// state without importing the cmd/eth-replayd module.
+type ReplayWitnessAccount struct {
+	Balance  string            `json:"balance"`
+	Nonce    string            `json:"nonce"`
+	CodeHash string            `json:"codeHash"`
+	Code     string            `json:"code,omitempty"`
+	Storage  map[string]string `json:"storage"`
+}
+
+// ReplayBlockWitness is the witness section of a block dataset.
+type ReplayBlockWitness struct {
+	Accounts map[string]*ReplayWitnessAccount `json:"accounts"`
+}
+
+// blockWitnessRaw is the minimal JSON schema for parsing the "witness" section
+// from a block dataset file, without decoding the full block.
+type blockWitnessRaw struct {
+	Witness *ReplayBlockWitness `json:"witness"`
+}
+
 // LoadBlockTxs reads raw transaction data (to, input, hash) for a block.
 // This is used by the LLM spec executor to decode selectors and args.
 // The result is cached in txCache, mirroring LoadBlock's caching strategy.
@@ -192,4 +214,31 @@ func (dr *DatasetReader) LoadBlockTxs(blockNum uint64) ([]RawTransaction, error)
 	copy(txs, blk.Transactions)
 	dr.txCache[blockNum] = txs
 	return txs, nil
+}
+
+// LoadBlockWitness reads the witness (pre-state accounts + storage) for a
+// block. Used to initialize committedState before parallel re-execution.
+// The witness is read from the same .json.zst block file and is NOT cached
+// (it can be large); callers should hold onto the returned value.
+func (dr *DatasetReader) LoadBlockWitness(blockNum uint64) (*ReplayBlockWitness, error) {
+	if blockNum < uint64(dr.manifest.FromBlock) || blockNum > uint64(dr.manifest.ToBlock) {
+		return nil, fmt.Errorf("block %d outside manifest [%d,%d]", blockNum, dr.manifest.FromBlock, dr.manifest.ToBlock)
+	}
+	p := filepath.Join(dr.dir, "blocks", fmt.Sprintf("%d.json.zst", blockNum))
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return nil, fmt.Errorf("open block %d: %w", blockNum, err)
+	}
+	decompressed, err := dr.dec.DecodeAll(raw, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decompress block %d: %w", blockNum, err)
+	}
+	var blk blockWitnessRaw
+	if err := json.Unmarshal(decompressed, &blk); err != nil {
+		return nil, fmt.Errorf("parse block %d witness: %w", blockNum, err)
+	}
+	if blk.Witness == nil {
+		return nil, fmt.Errorf("block %d has no witness section", blockNum)
+	}
+	return blk.Witness, nil
 }

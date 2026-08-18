@@ -40,12 +40,33 @@ type BlockExecResult struct {
 
 type TxExecutor struct {
 	chainConfig *params.ChainConfig
+	baseState   *state.StateDB
+	blockEnv    *BlockEnv
 }
 
 func NewTxExecutor() *TxExecutor {
 	return &TxExecutor{
 		chainConfig: params.MainnetChainConfig,
 	}
+}
+
+func (te *TxExecutor) SetBaseState(sdb *state.StateDB) {
+	te.baseState = sdb
+}
+
+func (te *TxExecutor) SetBlockEnv(env *BlockEnv) {
+	te.blockEnv = env
+}
+
+// BaseState returns the internally stored witness base state.
+// Read-only access for callers that need to pass it to PreExecuteTx etc.
+func (te *TxExecutor) BaseState() *state.StateDB {
+	return te.baseState
+}
+
+// BlockEnv returns the internally stored block environment.
+func (te *TxExecutor) BlockEnv() *BlockEnv {
+	return te.blockEnv
 }
 
 // ChainConfig exposes the executor's chain config for state construction.

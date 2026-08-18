@@ -79,6 +79,24 @@ type SerialExecuteAllResp struct {
 	DurationMs int64            `json:"durationMs"`
 }
 
+type ExecTxWithStateReq struct {
+	BlockNum uint64            `json:"blockNum"`
+	TxIdx    int               `json:"txIdx"`
+	State    map[string]string `json:"state"` // canonical key -> hex value
+}
+
+type ExecTxWithStateResp struct {
+	Ok          bool              `json:"ok"`
+	Error       string            `json:"error,omitempty"`
+	TxIdx       int               `json:"txIdx"`
+	TxHash      string            `json:"txHash"`
+	Success     bool              `json:"success"`
+	GasUsed     uint64            `json:"gasUsed"`
+	ReadKeys    []string          `json:"readKeys"`
+	WriteKeys   []string          `json:"writeKeys"`
+	WriteValues map[string]string `json:"writeValues"`
+}
+
 type InfoResp struct {
 	FromBlock    int    `json:"fromBlock"`
 	ToBlock      int    `json:"toBlock"`
@@ -305,6 +323,57 @@ func (s *replayServer) serialExecuteAll(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// executeTxWithState runs a single tx on a fresh clone of the base state after
+// injecting the client-supplied state map. This is the stateful re-execution
+// primitive used by Depurge's validation phase: the client supplies the current
+// committed state snapshot (only keys that have been modified by previously
+// committed txs), and the server executes the tx on top of it, returning the
+// real RW keys and post-execution write values.
+//
+// Concurrency: each call clones the base state independently, so concurrent
+// calls are fully isolated and safe.
+func (s *replayServer) executeTxWithState(w http.ResponseWriter, r *http.Request) {
+	var req ExecTxWithStateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "decode: "+err.Error())
+		return
+	}
+
+	s.mu.RLock()
+	if s.currentBlockData == nil || s.currentBlock != req.BlockNum {
+		s.mu.RUnlock()
+		writeErr(w, http.StatusBadRequest, "call /load_block first")
+		return
+	}
+	if req.TxIdx < 0 || req.TxIdx >= len(s.currentBlockData.Transactions) {
+		s.mu.RUnlock()
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("txIdx %d out of range [0,%d)", req.TxIdx, len(s.currentBlockData.Transactions)))
+		return
+	}
+	txRaw := s.currentBlockData.Transactions[req.TxIdx]
+	baseState := s.baseState
+	blockEnv := *s.blockEnv
+	s.mu.RUnlock()
+
+	result, err := s.executor.ExecuteTxWithState(baseState, &blockEnv, txRaw, req.TxIdx, req.State)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ExecTxWithStateResp{
+		Ok:          true,
+		TxIdx:       result.TxIndex,
+		TxHash:      result.TxHash,
+		Success:     result.Success,
+		GasUsed:     result.GasUsed,
+		ReadKeys:    result.ReadKeys,
+		WriteKeys:   result.WriteKeys,
+		WriteValues: result.WriteValues,
+		Error:       result.Error,
+	})
+}
+
 // StartHTTPServer constructs and starts the replay daemon HTTP service.
 // It blocks until the server shuts down.
 func StartHTTPServer(listenAddr string, datasetDir string, concurrency int) error {
@@ -331,6 +400,7 @@ func StartHTTPServer(listenAddr string, datasetDir string, concurrency int) erro
 	mux.HandleFunc("/pre_execute", s.preExecute)
 	mux.HandleFunc("/pre_execute_all", s.preExecuteAll)
 	mux.HandleFunc("/serial_execute_all", s.serialExecuteAll)
+	mux.HandleFunc("/execute_tx_with_state", s.executeTxWithState)
 
 	httpSrv := &http.Server{
 		Addr:         listenAddr,

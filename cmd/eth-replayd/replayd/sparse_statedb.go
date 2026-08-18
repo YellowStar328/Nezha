@@ -177,6 +177,12 @@ func BuildBlockEnv(header map[string]interface{}, blockHashWindow map[uint64]com
 	return env
 }
 
+// BuildBlockEnvSimple builds a BlockEnv without a block hash window.
+// Used by callers that don't need historical block lookups.
+func BuildBlockEnvSimple(header map[string]interface{}) *BlockEnv {
+	return BuildBlockEnv(header, map[uint64]common.Hash{})
+}
+
 func AcctKey(addr string, field string) string {
 	addr = strings.ToLower(addr)
 	if !strings.HasPrefix(addr, "0x") {

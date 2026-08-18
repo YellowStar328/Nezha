@@ -44,6 +44,17 @@ func New(dbPath string, blockNumber *big.Int, origin common.Address) *LEVM {
 	return &lvm
 }
 
+// NewMemory creates a new LEVM backed by an in-memory ethdb (no leveldb on
+// disk). Use this for concurrent worker pools where N EVM instances run in
+// parallel and never need to persist state (snapshot/revert only). Avoids
+// leveldb I/O contention across workers.
+func NewMemory(blockNumber *big.Int, origin common.Address) *LEVM {
+	lvm := LEVM{}
+	lvm.stateDB, lvm.edb = vmi.NewMemoryStateDB()
+	lvm.NewEVM(blockNumber, origin)
+	return &lvm
+}
+
 // NewEVM creates a fresh evm instance with
 // new origin and blocknumber and time.
 // This method recreates the contained EVM while
@@ -61,6 +72,25 @@ func (lvm *LEVM) NewEVM(blockNumber *big.Int, origin common.Address) {
 
 	// Use a chain config with all major forks enabled from block 0 so
 	// contracts compiled by modern solc versions can execute in this LEVM.
+	lvm.evm = vm.NewEVM(vmContext, lvm.stateDB, params.AllEthashProtocolChanges, vmConfig)
+	lvm.structLogger = structLogger
+}
+
+// NewEVMNoTrace creates a fresh EVM instance with a RW-set-only logger.
+//
+// This is the high-performance path for concurrent worker pools
+// (LevmSpecFallbackPool) where only read/write key capture matters. The
+// logger still records SLOAD/SSTORE into readValues/changedValues (needed by
+// RWSetCapture), but skips the expensive per-instruction memory/stack/storage
+// snapshot that would otherwise dominate CPU and GC across N workers.
+//
+// Use NewEVM (with full trace) only when you actually need instruction-level
+// debugging output.
+func (lvm *LEVM) NewEVMNoTrace(blockNumber *big.Int, origin common.Address) {
+	chainContext := vmi.NewChainContext(origin)
+	vmContext := vmi.NewVMContext(origin, origin, blockNumber, chainContext)
+	structLogger := vm.NewRWSetLogger()
+	vmConfig := vm.Config{Debug: true, Tracer: structLogger}
 	lvm.evm = vm.NewEVM(vmContext, lvm.stateDB, params.AllEthashProtocolChanges, vmConfig)
 	lvm.structLogger = structLogger
 }

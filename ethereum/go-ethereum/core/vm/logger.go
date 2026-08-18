@@ -117,6 +117,17 @@ type StructLogger struct {
 	readValues    map[common.Address]Storage
 	output        []byte
 	err           error
+
+	// rwOnly, when true, makes CaptureState record ONLY SLOAD/SSTORE entries
+	// (readValues / changedValues) and SKIP the expensive per-instruction
+	// snapshot of memory/stack/storage into l.logs. This is the fast path for
+	// concurrent worker pools (LevmSpecFallbackPool) that only need the
+	// read/write key set, not instruction-level tracing.
+	//
+	// Without this flag, CaptureState deep-copies memory + stack + storage on
+	// EVERY opcode, which is ~10x CPU overhead and massive GC pressure across
+	// N concurrent EVM instances — effectively serializing the pool.
+	rwOnly bool
 }
 
 // NewStructLogger returns a new logger
@@ -129,6 +140,17 @@ func NewStructLogger(cfg *LogConfig) *StructLogger {
 		logger.cfg = *cfg
 	}
 	return logger
+}
+
+// NewRWSetLogger returns a StructLogger configured for read/write set capture
+// ONLY — no memory/stack/storage snapshot per instruction. Use this in
+// concurrent worker pools where only RWSetCapture matters.
+func NewRWSetLogger() *StructLogger {
+	return &StructLogger{
+		changedValues: make(map[common.Address]Storage),
+		readValues:    make(map[common.Address]Storage),
+		rwOnly:        true,
+	}
 }
 
 // CaptureStart implements the Tracer interface to initialize the tracing operation.
@@ -169,6 +191,12 @@ func (l *StructLogger) CaptureState(env *EVM, pc uint64, op OpCode, gas, cost ui
 			address = common.BigToHash(stack.data[stack.len()-1])
 		)
 		l.changedValues[contract.Address()][address] = value
+	}
+
+	// rwOnly mode: read/write set captured above — skip the expensive
+	// memory/stack/storage snapshot that only feeds instruction-level tracing.
+	if l.rwOnly {
+		return nil
 	}
 
 	// Copy a snapshot of the current memory state to a new buffer

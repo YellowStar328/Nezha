@@ -4,6 +4,17 @@ import (
 	"Nezha/core"
 )
 
+// SpecFallback is the minimal interface that LLMSpecExecutor depends on for
+// EVM fallback when LLM analysis is unavailable (contract creation, plain
+// transfer, or unanalyzed function selector).
+//
+// *HTTPReplayExecutor (HTTP mode) and *LevmSpecFallback (in-process, no HTTP)
+// both implement it. Defined here so utils doesn't need to import levm or the
+// HTTP client — concrete implementations live alongside their dependencies.
+type SpecFallback interface {
+	PreExecute(blockNum uint64, txIdx int) (*core.ReplayRWSet, error)
+}
+
 // ReplayContractName is the synthetic contract name assigned to every
 // RWNode produced from an Ethereum mainnet replay. The existing schedulers
 // (ClassicalGraph / Depurge) use RWNode.CompositeKey() which prepends the

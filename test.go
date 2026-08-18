@@ -70,7 +70,59 @@ func main() {
 	flag.BoolVar(&Depurge, "Depurge", false, "specify Depurge mode mode to use. defaults to false.")
 	flag.BoolVar(&Vegeta, "Vegeta", false, "specify Vegeta mode to use. defaults to false.")
 	flag.BoolVar(&benchmark, "benchmark", false, "specify benchmark mode to use. defaults to false.")
+
+	// Replay mode flags (mainnet block replay via eth-replayd).
+	var replaydURL string
+	var datasetDir string
+	var blockNumReplay uint64
+	var replayDepurge bool
+	flag.StringVar(&replaydURL, "replayd", "", "eth-replayd HTTP endpoint (enables replay mode)")
+	flag.StringVar(&datasetDir, "dataset", "", "Path to mainnet dataset directory (replay mode)")
+	flag.Uint64Var(&blockNumReplay, "block-num", 24000000, "Block number to replay (replay mode)")
+	flag.BoolVar(&replayDepurge, "replay-depurge", false, "Run pure-levm Depurge on mainnet block (no HTTP, uses LLM static analysis + LevmSpecFallback)")
 	flag.Parse()
+
+	// Replay-depurge mode: pure-levm path (no HTTP, no replayd). Runs the full
+	// Depurge algorithm on a mainnet block using LLM static analysis for
+	// conservative RW sets and in-process levm for re-execution.
+	if replayDepurge {
+		file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0666)
+		if err != nil {
+			log.Fatalf("open output file: %v", err)
+		}
+		defer file.Close()
+		w := bufio.NewWriter(file)
+		defer w.Flush()
+
+		w.WriteString(fmt.Sprintf("Replay started at: %s\n", time.Now().Format(time.RFC3339)))
+		w.WriteString(fmt.Sprintf("===================================================\n"))
+		w.Flush()
+
+		if err := runReplayDepurgeMode(w, datasetDir, blockNumReplay); err != nil {
+			log.Fatalf("replay depurge mode: %v", err)
+		}
+		return
+	}
+
+	// Replay mode: skip synthetic test setup, go straight to mainnet replay.
+	if replaydURL != "" {
+		file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0666)
+		if err != nil {
+			log.Fatalf("open output file: %v", err)
+		}
+		defer file.Close()
+		w := bufio.NewWriter(file)
+		defer w.Flush()
+
+		w.WriteString(fmt.Sprintf("Replay started at: %s\n", time.Now().Format(time.RFC3339)))
+		w.WriteString(fmt.Sprintf("===================================================\n"))
+		w.Flush()
+
+		if err := runReplayMode(w, datasetDir, replaydURL, blockNumReplay, serial, CG, Depurge); err != nil {
+			log.Fatalf("replay mode: %v", err)
+		}
+		return
+	}
 
 	err := utils.InitContractManager("./config/contracts.yaml")
 	if err != nil {

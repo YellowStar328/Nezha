@@ -3,6 +3,7 @@ package core
 import (
 	"container/list"
 	"sort"
+	"sync"
 )
 
 type TransactionQueue struct {
@@ -63,7 +64,26 @@ func (q *TransactionQueue) remove(txID string) bool {
 	return false
 }
 
+// DepurgeScheduler schedules transactions based on conservative key dependencies.
+//
+// Thread safety: all public methods are guarded by mu (RWMutex). Read methods
+// (GetConservativeKeys, IsExecuted, GetReadyCount, GetReadyQueueLen,
+// GetPruneReadyQueueLen) take RLock; mutating methods (Execute, Abort, Prune,
+// PopReady, PopPruneReady, PushReady) take Lock.
+//
+// The COMPOSITION of calls (e.g. PopReady then Execute) is NOT atomic — that's
+// by design: each txID is processed by exactly one worker at a time, and the
+// scheduler's job is to release the next txID's dependency count atomically
+// per-method. This is sufficient because:
+//   - txReadyCount[nextTx]-- is atomic under Lock
+//   - queue.pop() / queue.front() are atomic under Lock
+//   - txExecuted[txID] = true is atomic under Lock
+//
+// Setup methods (addTransaction, buildLevels, schedule) are NOT locked because
+// they are only called from Depurge_schedule, which runs single-threaded
+// before any worker goroutines start.
 type DepurgeScheduler struct {
+	mu              sync.RWMutex
 	keyQueues       map[string]*TransactionQueue
 	txKeyMap        map[string][]string
 	txExecuted      map[string]bool
@@ -162,6 +182,8 @@ func (ds *DepurgeScheduler) buildLevels() [][]string {
 }
 
 func (ds *DepurgeScheduler) Execute(txID string) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
 	if ds.txExecuted[txID] {
 		return
 	}
@@ -195,6 +217,8 @@ func (ds *DepurgeScheduler) Execute(txID string) {
 }
 
 func (ds *DepurgeScheduler) Abort(txID string) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
 	if ds.txExecuted[txID] {
 		return
 	}
@@ -235,6 +259,8 @@ func (ds *DepurgeScheduler) Abort(txID string) {
 }
 
 func (ds *DepurgeScheduler) Prune(txID string, realKeys []string) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
 	conservativeKeys := ds.txKeyMap[txID]
 	conservativeKeySet := make(map[string]bool)
 	for _, k := range conservativeKeys {
@@ -284,22 +310,32 @@ func (ds *DepurgeScheduler) Prune(txID string, realKeys []string) {
 }
 
 func (ds *DepurgeScheduler) GetReadyCount(txID string) int {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
 	return ds.txReadyCount[txID]
 }
 
 func (ds *DepurgeScheduler) GetConservativeKeys(txID string) []string {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
 	return ds.txKeyMap[txID]
 }
 
 func (ds *DepurgeScheduler) IsExecuted(txID string) bool {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
 	return ds.txExecuted[txID]
 }
 
 func (ds *DepurgeScheduler) GetReadyQueueLen() int {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
 	return ds.readyQueue.Len()
 }
 
 func (ds *DepurgeScheduler) PopReady() string {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
 	elem := ds.readyQueue.Front()
 	if elem == nil {
 		return ""
@@ -309,14 +345,20 @@ func (ds *DepurgeScheduler) PopReady() string {
 }
 
 func (ds *DepurgeScheduler) PushReady(txID string) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
 	ds.readyQueue.PushBack(txID)
 }
 
 func (ds *DepurgeScheduler) GetPruneReadyQueueLen() int {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
 	return ds.pruneReadyQueue.Len()
 }
 
 func (ds *DepurgeScheduler) PopPruneReady() string {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
 	elem := ds.pruneReadyQueue.Front()
 	if elem == nil {
 		return ""

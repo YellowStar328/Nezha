@@ -1,26 +1,74 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"Nezha/core"
 )
+
+// LLMSpecStats contains high-level counters from a LLMSpecExecuteAll run.
+// Useful for performance reports to distinguish true LLM-cache hits from
+// EVM fallback (which dominates the pre-analysis time when LLM cache is
+// sparse, e.g. mainnet replay of unknown contracts).
+type LLMSpecStats struct {
+	Total         int // total txs processed
+	LLMHit        int // specs produced purely from static analysis (no EVM)
+	FallbackCount int // specs produced via SpecFallback.PreExecute (EVM)
+	FallbackOK    int // FallbackCount that returned Success=true
+	// FallbackReasons tallies why each fallback happened. Keys are short
+	// labels derived from the error type:
+	//   "no-cache"            — ErrNotPreAnalyzed (cache file missing)
+	//   "unresolvable-acct"   — ErrUnresolvableAccount (global-var-as-key)
+	//   "cross-call-miss"    — ErrCrossContractNotCached
+	//   "creation"            — tx.To == "" (contract creation)
+	//   "no-calldata"         — len(tx.Input) < 10 (plain transfer)
+	//   "other"               — any other error
+	FallbackReasons map[string]int
+}
 
 // LLMSpecExecutor generates speculative RW sets using LLM static analysis
 // instead of EVM pre-execution. Falls back to EVM PreExecute for unanalyzed txs.
 type LLMSpecExecutor struct {
 	mgr     *MainnetContractManager
-	evmExec *HTTPReplayExecutor // for fallback
+	evmExec SpecFallback // for fallback (HTTP or in-process levm)
 }
 
 // NewLLMSpecExecutor creates a new LLMSpecExecutor that uses the given contract
 // manager for LLM-analyzed RW sets and the given EVM executor for fallback.
-func NewLLMSpecExecutor(mgr *MainnetContractManager, evmExec *HTTPReplayExecutor) *LLMSpecExecutor {
+// evmExec may be *HTTPReplayExecutor (HTTP mode) or *LevmSpecFallback
+// (in-process, no HTTP).
+func NewLLMSpecExecutor(mgr *MainnetContractManager, evmExec SpecFallback) *LLMSpecExecutor {
 	return &LLMSpecExecutor{
 		mgr:     mgr,
 		evmExec: evmExec,
 	}
+}
+
+// classifyFallbackReason returns a short label explaining why a tx fell back
+// to EVM PreExecute. Used for diagnostic stats in LLMSpecStats.FallbackReasons.
+func classifyFallbackReason(tx RawTransaction, llmErr error) string {
+	if tx.To == "" {
+		return "creation"
+	}
+	if len(tx.Input) < 10 {
+		return "no-calldata"
+	}
+	if llmErr == nil {
+		return "unknown"
+	}
+	if errors.Is(llmErr, ErrNotPreAnalyzed) {
+		return "no-cache"
+	}
+	if errors.Is(llmErr, ErrUnresolvableAccount) {
+		return "unresolvable-acct"
+	}
+	if errors.Is(llmErr, ErrCrossContractNotCached) {
+		return "cross-call-miss"
+	}
+	return "other"
 }
 
 // LLMSpecExecuteAll is the main entry point. It generates speculative RW sets
@@ -43,6 +91,13 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAll(ds *DatasetReader, blockNum uint64) 
 			if ferr != nil {
 				return nil, fmt.Errorf("evm fallback %d:%d: %w", blockNum, txIdx, ferr)
 			}
+			// EVM PreExecute captures slot: storage keys via rwTracker,
+			// but NOT account-metadata keys (balance / nonce / code /
+			// exist). Augment them here so the conservative set covers
+			// these — otherwise validation will see real keys ⊋
+			// conservative and spuriously abort.
+			args := MainnetTxArgs{MsgSender: strings.ToLower(tx.From)}
+			rw.ReadKeys, rw.WriteKeys = augmentAccountKeys(rw.ReadKeys, rw.WriteKeys, tx, args)
 			out[txIdx] = rw
 			continue
 		}
@@ -61,6 +116,8 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAll(ds *DatasetReader, blockNum uint64) 
 			if ferr != nil {
 				return nil, fmt.Errorf("evm fallback %d:%d (llm err: %v): %w", blockNum, txIdx, gerr, ferr)
 			}
+			// Same augment as the creation/transfer fallback above.
+			rw.ReadKeys, rw.WriteKeys = augmentAccountKeys(rw.ReadKeys, rw.WriteKeys, tx, args)
 			out[txIdx] = rw
 			continue
 		}
@@ -86,6 +143,142 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAll(ds *DatasetReader, blockNum uint64) 
 		}
 	}
 	return out, nil
+}
+
+// BatchPreExecutor is an optional interface that SpecFallback implementations
+// can implement to run PreExecute concurrently for a batch of tx indices.
+// *LevmSpecFallbackPool implements it; *HTTPReplayExecutor and single
+// *LevmSpecFallback do not (they fall back to serial PreExecute).
+type BatchPreExecutor interface {
+	PreExecuteBatch(txIndices []int) ([]*core.ReplayRWSet, []error)
+}
+
+// LLMSpecExecuteAllWithStats is the same as LLMSpecExecuteAll but additionally
+// returns a LLMSpecStats breakdown distinguishing LLM-cache hits from EVM
+// fallbacks. Callers printing performance reports should prefer this variant.
+//
+// If the underlying SpecFallback implements BatchPreExecutor (e.g.
+// LevmSpecFallbackPool), EVM fallbacks are executed CONCURRENTLY instead of
+// serially — this is the fast path for mainnet replay where most txs fall
+// back to EVM due to sparse LLM cache coverage.
+func (e *LLMSpecExecutor) LLMSpecExecuteAllWithStats(ds *DatasetReader, blockNum uint64) ([]*core.ReplayRWSet, LLMSpecStats, error) {
+	txs, err := ds.LoadBlockTxs(blockNum)
+	if err != nil {
+		return nil, LLMSpecStats{}, fmt.Errorf("load block txs %d: %w", blockNum, err)
+	}
+	stats := LLMSpecStats{
+		Total:           len(txs),
+		FallbackReasons: make(map[string]int),
+	}
+	out := make([]*core.ReplayRWSet, len(txs))
+
+	// Phase 1: walk all txs serially. LLM analysis is fast (file read + key
+	// conversion); collect txs that need EVM fallback into a batch.
+	type fallbackEntry struct {
+		txIdx int
+		args  MainnetTxArgs
+		// llmErr is nil for creation/no-calldata fallbacks
+		llmErr error
+	}
+	var fallbackBatch []fallbackEntry
+
+	phase1Start := time.Now()
+	for txIdx, tx := range txs {
+		if tx.To == "" || len(tx.Input) < 10 {
+			stats.FallbackCount++
+			stats.FallbackReasons[classifyFallbackReason(tx, nil)]++
+			fallbackBatch = append(fallbackBatch, fallbackEntry{
+				txIdx: txIdx,
+				args:  MainnetTxArgs{MsgSender: strings.ToLower(tx.From)},
+			})
+			continue
+		}
+
+		selector := strings.ToLower(tx.Input[0:10])
+		toAddr := strings.ToLower(tx.To)
+		args := e.decodeArgs(toAddr, selector, tx.Input)
+		args.MsgSender = strings.ToLower(tx.From)
+
+		readKeys, writeKeys, gerr := e.mgr.GetConservativeRWSet(toAddr, selector, args)
+		if gerr != nil {
+			stats.FallbackCount++
+			stats.FallbackReasons[classifyFallbackReason(tx, gerr)]++
+			fallbackBatch = append(fallbackBatch, fallbackEntry{
+				txIdx:  txIdx,
+				args:   args,
+				llmErr: gerr,
+			})
+			continue
+		}
+
+		// LLM hit — produce spec immediately (no EVM call).
+		stats.LLMHit++
+		readKeys, writeKeys = augmentAccountKeys(readKeys, writeKeys, tx, args)
+		out[txIdx] = &core.ReplayRWSet{
+			Ref: core.ReplayRef{
+				BlockNum: blockNum,
+				TxIndex:  txIdx,
+				TxHash:   tx.Hash,
+			},
+			Success:   true,
+			GasUsed:   0,
+			ReadKeys:  readKeys,
+			WriteKeys: writeKeys,
+		}
+	}
+
+	// Phase 2: execute EVM fallbacks. Prefer concurrent batch path when the
+	// SpecFallback supports it (LevmSpecFallbackPool); otherwise serial.
+	fmt.Printf("[LLMSpec] Phase 1 done: %v (%d LLM hits, %d fallbacks queued)\n",
+		time.Since(phase1Start), stats.LLMHit, len(fallbackBatch))
+	if len(fallbackBatch) == 0 {
+		return out, stats, nil
+	}
+
+	if batcher, ok := e.evmExec.(BatchPreExecutor); ok {
+		// Concurrent path.
+		fmt.Printf("[LLMSpec] Phase 2: %d EVM fallbacks via BatchPreExecutor (concurrent)\n", len(fallbackBatch))
+		phase2Start := time.Now()
+		txIndices := make([]int, len(fallbackBatch))
+		for i, fb := range fallbackBatch {
+			txIndices[i] = fb.txIdx
+		}
+		results, errs := batcher.PreExecuteBatch(txIndices)
+		phase2Dur := time.Since(phase2Start)
+		fmt.Printf("[LLMSpec] Phase 2 done: %v (%d fallbacks, ~%.1f ms/tx wall, concurrency amortized)\n",
+			phase2Dur, len(fallbackBatch),
+			float64(phase2Dur.Milliseconds())/float64(len(fallbackBatch)))
+		for i, fb := range fallbackBatch {
+			rw := results[i]
+			if err := errs[i]; err != nil {
+				return nil, stats, fmt.Errorf("evm fallback %d:%d (llm err: %v): %w",
+					blockNum, fb.txIdx, fb.llmErr, err)
+			}
+			if rw.Success {
+				stats.FallbackOK++
+			}
+			tx := txs[fb.txIdx]
+			rw.ReadKeys, rw.WriteKeys = augmentAccountKeys(rw.ReadKeys, rw.WriteKeys, tx, fb.args)
+			out[fb.txIdx] = rw
+		}
+	} else {
+		// Serial fallback path (HTTPReplayExecutor or single LevmSpecFallback).
+		for _, fb := range fallbackBatch {
+			txIdx := fb.txIdx
+			tx := txs[txIdx]
+			rw, ferr := e.evmExec.PreExecute(blockNum, txIdx)
+			if ferr != nil {
+				return nil, stats, fmt.Errorf("evm fallback %d:%d (llm err: %v): %w",
+					blockNum, txIdx, fb.llmErr, ferr)
+			}
+			if rw.Success {
+				stats.FallbackOK++
+			}
+			rw.ReadKeys, rw.WriteKeys = augmentAccountKeys(rw.ReadKeys, rw.WriteKeys, tx, fb.args)
+			out[txIdx] = rw
+		}
+	}
+	return out, stats, nil
 }
 
 // augmentAccountKeys adds the account-level (acct:addr:balance/nonce/code/exist)

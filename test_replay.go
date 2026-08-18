@@ -699,9 +699,12 @@ func runReplayDepurgeMode(
 	startExec := time.Now()
 	validationAborted := 0
 	var noContextCount, reexecErrorCount, keyExceedCount int32
+	var keyExceedLLM, keyExceedPreexec int32 // attribute key-exceed aborts by conservative-key source
 	var serialReplayList []string
 	var serialReplayLock sync.Mutex
 	var abortCountLock sync.Mutex
+	var llmDiffOnce sync.Once     // dump key-diff for the first LLM-sourced abort only
+	var preexecDiffOnce sync.Once // dump key-diff for the first preexec-sourced abort only
 	totalPrunedKeys := 0
 	committed := 0
 	var inProgress int32
@@ -782,6 +785,51 @@ func runReplayDepurgeMode(
 
 		if exceed {
 			atomic.AddInt32(&keyExceedCount, 1)
+			// Attribute the abort to the conservative-key source so we
+			// can tell LLM-analysis gaps from PreExecute base-state
+			// divergence. txIdx is guaranteed valid here (noContextCount
+			// path returned earlier).
+			isLLM := txIdx >= 0 && txIdx < len(stats.Sources) && stats.Sources[txIdx] == "llm"
+			if isLLM {
+				atomic.AddInt32(&keyExceedLLM, 1)
+			} else {
+				atomic.AddInt32(&keyExceedPreexec, 1)
+			}
+			// Dump the FIRST abort's key diff per source so we can see
+			// EXACTLY which keys the conservative set missed AND whether
+			// the gap is a format-encoding mismatch vs a real miss.
+			diffOnce := &llmDiffOnce
+			if !isLLM {
+				diffOnce = &preexecDiffOnce
+			}
+			diffOnce.Do(func() {
+				var missing []string
+				for k := range realKeySet {
+					if !conservativeKeySet[k] {
+						missing = append(missing, k)
+					}
+				}
+				sort.Strings(missing)
+				src := "preexec"
+				if isLLM {
+					src = "llm"
+				}
+				fmt.Printf("=== FIRST %s-ABORT DIFF (txID=%s, txIdx=%d) ===\n", src, txID, txIdx)
+				fmt.Printf("--- conservative keys (%d) ---\n", len(conservativeKeys))
+				for _, k := range conservativeKeys {
+					fmt.Printf("    %s\n", k)
+				}
+				fmt.Printf("--- real keys (%d, read=%d write=%d) ---\n",
+					len(realKeySet), len(result.RealReadKeys), len(result.RealWriteKeys))
+				for k := range realKeySet {
+					fmt.Printf("    %s\n", k)
+				}
+				fmt.Printf("--- MISSING keys (real but not in conservative, %d) ---\n", len(missing))
+				for _, k := range missing {
+					fmt.Printf("    %s\n", k)
+				}
+				fmt.Printf("=== END DIFF ===\n")
+			})
 			abortCountLock.Lock()
 			validationAborted++
 			abortCountLock.Unlock()
@@ -789,8 +837,14 @@ func runReplayDepurgeMode(
 			serialReplayLock.Lock()
 			serialReplayList = append(serialReplayList, txID)
 			serialReplayLock.Unlock()
-			fmt.Printf("  TX %s: aborted (real keys exceed conservative) - real=%d, conservative=%d\n",
-				txID, len(realKeySet), len(conservativeKeySet))
+			fmt.Printf("  TX %s: aborted (real keys exceed conservative) - real=%d, conservative=%d, source=%s\n",
+				txID, len(realKeySet), len(conservativeKeySet),
+				func() string {
+					if txIdx >= 0 && txIdx < len(stats.Sources) {
+						return stats.Sources[txIdx]
+					}
+					return "?"
+				}())
 			return
 		}
 
@@ -930,6 +984,8 @@ func runReplayDepurgeMode(
 	writer.WriteString(fmt.Sprintf("  - context not found: %d\n", atomic.LoadInt32(&noContextCount)))
 	writer.WriteString(fmt.Sprintf("  - re-execution error: %d\n", atomic.LoadInt32(&reexecErrorCount)))
 	writer.WriteString(fmt.Sprintf("  - key exceed (serial replayed): %d\n", atomic.LoadInt32(&keyExceedCount)))
+	writer.WriteString(fmt.Sprintf("    - by llm analysis  : %d\n", atomic.LoadInt32(&keyExceedLLM)))
+	writer.WriteString(fmt.Sprintf("    - by preexec base : %d\n", atomic.LoadInt32(&keyExceedPreexec)))
 	if txCount > 0 {
 		writer.WriteString(fmt.Sprintf("Committed: %d, Abort rate is: %.3f\n",
 			committed, float64(validationAborted)/float64(txCount)))

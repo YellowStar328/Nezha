@@ -27,6 +27,12 @@ type LLMSpecStats struct {
 	//   "no-calldata"         — len(tx.Input) < 10 (plain transfer)
 	//   "other"               — any other error
 	FallbackReasons map[string]int
+	// Sources is indexed by txIdx and labels the ORIGIN of each tx's
+	// conservative RW set: "llm" (from LLM static-analysis cache) or
+	// "preexec" (from EVM PreExecute fallback on witness base state).
+	// Used by the validation loop to attribute key-exceed aborts to
+	// either LLM-analysis gaps or pre-execution state-path divergence.
+	Sources []string
 }
 
 // LLMSpecExecutor generates speculative RW sets using LLM static analysis
@@ -169,6 +175,7 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAllWithStats(ds *DatasetReader, blockNum
 	stats := LLMSpecStats{
 		Total:           len(txs),
 		FallbackReasons: make(map[string]int),
+		Sources:         make([]string, len(txs)),
 	}
 	out := make([]*core.ReplayRWSet, len(txs))
 
@@ -187,6 +194,7 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAllWithStats(ds *DatasetReader, blockNum
 		if tx.To == "" || len(tx.Input) < 10 {
 			stats.FallbackCount++
 			stats.FallbackReasons[classifyFallbackReason(tx, nil)]++
+			stats.Sources[txIdx] = "preexec"
 			fallbackBatch = append(fallbackBatch, fallbackEntry{
 				txIdx: txIdx,
 				args:  MainnetTxArgs{MsgSender: strings.ToLower(tx.From)},
@@ -203,6 +211,7 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAllWithStats(ds *DatasetReader, blockNum
 		if gerr != nil {
 			stats.FallbackCount++
 			stats.FallbackReasons[classifyFallbackReason(tx, gerr)]++
+			stats.Sources[txIdx] = "preexec"
 			fallbackBatch = append(fallbackBatch, fallbackEntry{
 				txIdx:  txIdx,
 				args:   args,
@@ -213,6 +222,7 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAllWithStats(ds *DatasetReader, blockNum
 
 		// LLM hit — produce spec immediately (no EVM call).
 		stats.LLMHit++
+		stats.Sources[txIdx] = "llm"
 		readKeys, writeKeys = augmentAccountKeys(readKeys, writeKeys, tx, args)
 		out[txIdx] = &core.ReplayRWSet{
 			Ref: core.ReplayRef{
@@ -257,15 +267,19 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAllWithStats(ds *DatasetReader, blockNum
 			if rw.Success {
 				stats.FallbackOK++
 			}
-			tx := txs[fb.txIdx]
-			rw.ReadKeys, rw.WriteKeys = augmentAccountKeys(rw.ReadKeys, rw.WriteKeys, tx, fb.args)
+			// PreExecute already produced concrete slot keys from real EVM
+			// execution on the witness base state — these are exact keys,
+			// not abstract predictions. Account-key augmentation (mapping
+			// tx.From/args to acct:addr:balance) is only needed for the LLM
+			// static-analysis path, which emits slot keys only and misses
+			// acct: metadata. Augmenting PreExecute keys would be redundant
+			// mapping of already-concrete keys.
 			out[fb.txIdx] = rw
 		}
 	} else {
 		// Serial fallback path (HTTPReplayExecutor or single LevmSpecFallback).
 		for _, fb := range fallbackBatch {
 			txIdx := fb.txIdx
-			tx := txs[txIdx]
 			rw, ferr := e.evmExec.PreExecute(blockNum, txIdx)
 			if ferr != nil {
 				return nil, stats, fmt.Errorf("evm fallback %d:%d (llm err: %v): %w",
@@ -274,7 +288,7 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAllWithStats(ds *DatasetReader, blockNum
 			if rw.Success {
 				stats.FallbackOK++
 			}
-			rw.ReadKeys, rw.WriteKeys = augmentAccountKeys(rw.ReadKeys, rw.WriteKeys, tx, fb.args)
+			// PreExecute already produced concrete slot keys — no augment.
 			out[txIdx] = rw
 		}
 	}

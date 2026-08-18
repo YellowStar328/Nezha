@@ -1,7 +1,6 @@
 package core
 
 import (
-	"fmt"
 	"math/big"
 	"reflect"
 
@@ -62,8 +61,15 @@ func (rw *RWNode) assignSequence(edge []*RWNode) {
 }
 
 func ConvertByte2String(bytes []byte) string {
-	newString := fmt.Sprintf("%x", bytes)
-	return newString
+	// NOTE: previously this was fmt.Sprintf("%x", bytes), which hex-encoded
+	// the key bytes. That made conservative keys (which flow through
+	// RWNodesToContext → ConvertByte2String → txKeyMap) hex strings like
+	// "61636374...", while real keys from storageKeysToStrings are plain
+	// "slot:0x...:0x...". The set-membership check in the validation loop
+	// then ALWAYS failed (real ⊄ conservative) → 100% spurious aborts for
+	// any tx that touched a storage slot. Returning string(bytes) keeps
+	// conservative keys in the same plain-text format as real keys.
+	return string(bytes)
 }
 
 // LLMAccess 保存 LLM 原始的访问描述

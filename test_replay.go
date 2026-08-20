@@ -550,6 +550,7 @@ func runReplayDepurgeMode(
 	diskCommit bool,
 	trieDisk bool,
 	trieCacheMB int,
+	txsPerBlock int,
 ) error {
 	// --- Step 1: open dataset + load block range ---
 	ds, err := utils.NewDatasetReader(datasetDir)
@@ -709,41 +710,29 @@ func runReplayDepurgeMode(
 	committedDelta := make(map[string]string)
 	var committedDeltaLock sync.RWMutex
 
-	// --- Step 7: Depurge_schedule ---
-	startSched := time.Now()
-	scheduler, levels := core.Depurge_schedule(contexts)
-	schedDur := time.Since(startSched)
-
-	writer.WriteString(fmt.Sprintf("Time of schedule: %v\n", schedDur))
-	writer.WriteString(fmt.Sprintf("  Depurge levels: %d, txs/level: ", len(levels)))
-	for i, lvl := range levels {
-		if i > 0 {
-			writer.WriteString(" ")
-		}
-		writer.WriteString(fmt.Sprintf("%d", len(lvl)))
-		if i >= 5 && len(levels) > 6 {
-			writer.WriteString(fmt.Sprintf("…+%dmore", len(levels)-6))
-			break
-		}
+	// --- Step 7+8: per-block Depurge_schedule + validation loop ---
+	//
+	// When txsPerBlock > 0, the tx stream (in original block order) is split
+	// into blocks of that size and Depurge_schedule + validation run once per
+	// block — simulating one algorithm invocation per real block. This bounds
+	// the scheduler's per-run complexity (each run sees only blockSize txs).
+	// Block-splitting CONTROL work (slicing, map building, loop bookkeeping)
+	// is timed separately (blockControlDur) and NOT counted in the algorithm
+	// timings below.
+	//
+	// committedDelta / serialReplayList are shared across blocks: previous
+	// blocks' committed writes become the next block's overlay, and aborted
+	// txs from all blocks are serially replayed together after the loop.
+	orderedTxIDs := make([]string, 0, txCount)
+	for i := range specs {
+		orderedTxIDs = append(orderedTxIDs, block.Refs[i].TxHash)
 	}
-	writer.WriteString("\n")
-	writer.Flush()
-
-	// --- Step 8: validation loop (concurrent — mirrors test.go's TestDepurge) ---
-	//
-	// Each ants worker Acquire()s an idle LevmSpecFallback from levmPool, runs
-	// ReExecute (which snapshot/reverts internally — safe on a per-worker
-	// basis since each worker has its own stateDB), then Release()s it back.
-	// This mirrors test.go's InitEVMPool + evmPool.Get/Put + ants pool pattern.
-	//
-	// DepurgeScheduler methods (PopReady / PopPruneReady / Execute / Abort /
-	// Prune / GetConservativeKeys) are all called from goroutines here — they
-	// operate on disjoint scheduler state per txID (no cross-tx shared state
-	// except the queue/list structures, which are guarded by their own usage
-	// pattern: one txID is processed by exactly one worker at a time).
-	// committedState updates are guarded by committedStateLock; counters by
-	// atomic or abortCountLock.
-	startExec := time.Now()
+	blockSize := txsPerBlock
+	if blockSize <= 0 || blockSize >= txCount {
+		blockSize = txCount
+	}
+	nBlocks := (txCount + blockSize - 1) / blockSize
+	var totalSchedDur, totalExecDur, blockControlDur time.Duration
 	validationAborted := 0
 	var noContextCount, reexecErrorCount, keyExceedCount int32
 	var keyExceedLLM, keyExceedPreexec int32 // attribute key-exceed aborts by conservative-key source
@@ -756,235 +745,309 @@ func runReplayDepurgeMode(
 	var preexecDiffOnce sync.Once // dump key-diff for the first preexec-sourced abort only
 	totalPrunedKeys := 0
 	committed := 0
-	var inProgress int32
 
-	validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
-		txID := i.(string)
-		defer atomic.AddInt32(&inProgress, -1)
-
-		txIdx, ok := txIDToIdx[txID]
-		if !ok {
-			atomic.AddInt32(&noContextCount, 1)
-			abortCountLock.Lock()
-			validationAborted++
-			abortCountLock.Unlock()
-			scheduler.Abort(txID)
-			return
+	for start := 0; start < txCount; start += blockSize {
+		end := start + blockSize
+		if end > txCount {
+			end = txCount
 		}
 
-		conservativeKeys := scheduler.GetConservativeKeys(txID)
-		conservativeKeySet := make(map[string]bool, len(conservativeKeys))
-		for _, k := range conservativeKeys {
-			conservativeKeySet[k] = true
+		// Control work (excluded from algorithm timing): slice this block's
+		// txIDs and build its context map.
+		ctlStart := time.Now()
+		blockIDs := orderedTxIDs[start:end]
+		blockContexts := make(map[string]*core.TransactionContext, len(blockIDs))
+		for _, id := range blockIDs {
+			if ctx, ok := contexts[id]; ok {
+				blockContexts[id] = ctx
+			}
 		}
+		blockControlDur += time.Since(ctlStart)
 
-		// Pass only the incremental overlay (prior-tx deltas), NOT the full
-		// committedState. The witness baseline is already in the worker's sdb.
+		// Algorithm time: Depurge_schedule for this block.
+		startSched := time.Now()
+		scheduler, levels := core.Depurge_schedule(blockContexts)
+		schedDur := time.Since(startSched)
+		totalSchedDur += schedDur
+		if nBlocks > 1 {
+			writer.WriteString(fmt.Sprintf("  block %d/%d: schedule=%v levels=%d\n",
+				start/blockSize+1, nBlocks, schedDur, len(levels)))
+		} else {
+			writer.WriteString(fmt.Sprintf("Time of schedule: %v\n", schedDur))
+			writer.WriteString(fmt.Sprintf("  Depurge levels: %d, txs/level: ", len(levels)))
+			for i, lvl := range levels {
+				if i > 0 {
+					writer.WriteString(" ")
+				}
+				writer.WriteString(fmt.Sprintf("%d", len(lvl)))
+				if i >= 5 && len(levels) > 6 {
+					writer.WriteString(fmt.Sprintf("…+%dmore", len(levels)-6))
+					break
+				}
+			}
+			writer.WriteString("\n")
+		}
+		writer.Flush()
+
+		// Algorithm time: validation loop for this block (concurrent —
+		// mirrors test.go's TestDepurge).
 		//
-		// Filter the overlay to keys in THIS tx's conservative set: a real key
-		// outside the conservative set triggers key-exceed abort → serial
-		// replay anyway, so omitting those overlay entries cannot corrupt
-		// committed state. This cuts the per-tx clone+apply cost from
-		// O(|committedDelta|) to O(|conservativeKeys ∩ committedDelta|).
-		committedDeltaLock.RLock()
-		overlaySnapshot := filterOverlayByKeys(committedDelta, conservativeKeySet)
-		committedDeltaLock.RUnlock()
+		// Each ants worker Acquire()s an idle LevmSpecFallback from levmPool, runs
+		// ReExecute (which snapshot/reverts internally — safe on a per-worker
+		// basis since each worker has its own stateDB), then Release()s it back.
+		// This mirrors test.go's InitEVMPool + evmPool.Get/Put + ants pool pattern.
+		//
+		// DepurgeScheduler methods (PopReady / PopPruneReady / Execute / Abort /
+		// Prune / GetConservativeKeys) are all called from goroutines here — they
+		// operate on disjoint scheduler state per txID (no cross-tx shared state
+		// except the queue/list structures, which are guarded by their own usage
+		// pattern: one txID is processed by exactly one worker at a time).
+		// committedState updates are guarded by committedStateLock; counters by
+		// atomic or abortCountLock.
+		startExec := time.Now()
+		var inProgress int32
 
-		worker, err := levmPool.Acquire()
-		if err != nil {
-			atomic.AddInt32(&reexecErrorCount, 1)
-			abortCountLock.Lock()
-			validationAborted++
-			abortCountLock.Unlock()
-			scheduler.Abort(txID)
-			serialReplayLock.Lock()
-			serialReplayList = append(serialReplayList, txID)
-			serialReplayLock.Unlock()
-			fmt.Printf("  TX %s: aborted (worker acquire error: %v)\n", txID, err)
-			return
-		}
-		defer levmPool.Release(worker)
+		validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
+			txID := i.(string)
+			defer atomic.AddInt32(&inProgress, -1)
 
-		result, err := worker.ReExecute(fromBlock, txIdx, overlaySnapshot)
-		if err != nil {
-			atomic.AddInt32(&reexecErrorCount, 1)
-			abortCountLock.Lock()
-			validationAborted++
-			abortCountLock.Unlock()
-			scheduler.Abort(txID)
-			// Per project memory: reexec-fail aborts must also be added to
-			// serialReplayList (+ descendants) to maintain state consistency.
-			serialReplayLock.Lock()
-			serialReplayList = append(serialReplayList, txID)
-			serialReplayLock.Unlock()
-			fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
-			return
-		}
-
-		realKeySet := make(map[string]bool, len(result.RealReadKeys)+len(result.RealWriteKeys))
-		for _, k := range result.RealReadKeys {
-			realKeySet[k] = true
-		}
-		for _, k := range result.RealWriteKeys {
-			realKeySet[k] = true
-		}
-
-		// Check: real keys ⊆ conservative keys?
-		exceed := false
-		for key := range realKeySet {
-			if !conservativeKeySet[key] {
-				exceed = true
-				break
+			txIdx, ok := txIDToIdx[txID]
+			if !ok {
+				atomic.AddInt32(&noContextCount, 1)
+				abortCountLock.Lock()
+				validationAborted++
+				abortCountLock.Unlock()
+				scheduler.Abort(txID)
+				return
 			}
-		}
 
-		if exceed {
-			atomic.AddInt32(&keyExceedCount, 1)
-			// Attribute the abort to the conservative-key source so we
-			// can tell LLM-analysis gaps from PreExecute base-state
-			// divergence. txIdx is guaranteed valid here (noContextCount
-			// path returned earlier).
-			isLLM := txIdx >= 0 && txIdx < len(stats.Sources) && stats.Sources[txIdx] == "llm"
-			if isLLM {
-				atomic.AddInt32(&keyExceedLLM, 1)
-			} else {
-				atomic.AddInt32(&keyExceedPreexec, 1)
+			conservativeKeys := scheduler.GetConservativeKeys(txID)
+			conservativeKeySet := make(map[string]bool, len(conservativeKeys))
+			for _, k := range conservativeKeys {
+				conservativeKeySet[k] = true
 			}
-			// Dump the abort's key diff so we can see EXACTLY which keys the
-			// conservative set missed AND whether the gap is a format-encoding
-			// mismatch vs a real miss. By default only the FIRST abort per
-			// source is dumped (keeps logs small); set NEZHA_DUMP_DIFF=1 to
-			// dump every abort's full diff.
-			if os.Getenv("NEZHA_DUMP_DIFF") != "" {
-				dumpAbortKeyDiff(txID, txIdx, isLLM, conservativeKeys, conservativeKeySet, realKeySet)
-			} else {
-				diffOnce := &llmDiffOnce
-				if !isLLM {
-					diffOnce = &preexecDiffOnce
+
+			// Pass only the incremental overlay (prior-tx deltas), NOT the full
+			// committedState. The witness baseline is already in the worker's sdb.
+			//
+			// Filter the overlay to keys in THIS tx's conservative set: a real key
+			// outside the conservative set triggers key-exceed abort → serial
+			// replay anyway, so omitting those overlay entries cannot corrupt
+			// committed state. This cuts the per-tx clone+apply cost from
+			// O(|committedDelta|) to O(|conservativeKeys ∩ committedDelta|).
+			committedDeltaLock.RLock()
+			overlaySnapshot := filterOverlayByKeys(committedDelta, conservativeKeySet)
+			committedDeltaLock.RUnlock()
+
+			worker, err := levmPool.Acquire()
+			if err != nil {
+				atomic.AddInt32(&reexecErrorCount, 1)
+				abortCountLock.Lock()
+				validationAborted++
+				abortCountLock.Unlock()
+				scheduler.Abort(txID)
+				serialReplayLock.Lock()
+				serialReplayList = append(serialReplayList, txID)
+				serialReplayLock.Unlock()
+				fmt.Printf("  TX %s: aborted (worker acquire error: %v)\n", txID, err)
+				return
+			}
+			defer levmPool.Release(worker)
+
+			result, err := worker.ReExecute(fromBlock, txIdx, overlaySnapshot)
+			if err != nil {
+				atomic.AddInt32(&reexecErrorCount, 1)
+				abortCountLock.Lock()
+				validationAborted++
+				abortCountLock.Unlock()
+				scheduler.Abort(txID)
+				// Per project memory: reexec-fail aborts must also be added to
+				// serialReplayList (+ descendants) to maintain state consistency.
+				serialReplayLock.Lock()
+				serialReplayList = append(serialReplayList, txID)
+				serialReplayLock.Unlock()
+				fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
+				return
+			}
+
+			realKeySet := make(map[string]bool, len(result.RealReadKeys)+len(result.RealWriteKeys))
+			for _, k := range result.RealReadKeys {
+				realKeySet[k] = true
+			}
+			for _, k := range result.RealWriteKeys {
+				realKeySet[k] = true
+			}
+
+			// Check: real keys ⊆ conservative keys?
+			exceed := false
+			for key := range realKeySet {
+				if !conservativeKeySet[key] {
+					exceed = true
+					break
 				}
-				diffOnce.Do(func() {
+			}
+
+			if exceed {
+				atomic.AddInt32(&keyExceedCount, 1)
+				// Attribute the abort to the conservative-key source so we
+				// can tell LLM-analysis gaps from PreExecute base-state
+				// divergence. txIdx is guaranteed valid here (noContextCount
+				// path returned earlier).
+				isLLM := txIdx >= 0 && txIdx < len(stats.Sources) && stats.Sources[txIdx] == "llm"
+				if isLLM {
+					atomic.AddInt32(&keyExceedLLM, 1)
+				} else {
+					atomic.AddInt32(&keyExceedPreexec, 1)
+				}
+				// Dump the abort's key diff so we can see EXACTLY which keys the
+				// conservative set missed AND whether the gap is a format-encoding
+				// mismatch vs a real miss. By default only the FIRST abort per
+				// source is dumped (keeps logs small); set NEZHA_DUMP_DIFF=1 to
+				// dump every abort's full diff.
+				if os.Getenv("NEZHA_DUMP_DIFF") != "" {
 					dumpAbortKeyDiff(txID, txIdx, isLLM, conservativeKeys, conservativeKeySet, realKeySet)
-				})
-			}
-			abortCountLock.Lock()
-			validationAborted++
-			abortCountLock.Unlock()
-			scheduler.Abort(txID)
-			serialReplayLock.Lock()
-			serialReplayList = append(serialReplayList, txID)
-			serialReplayLock.Unlock()
-			var missing []string
-			for k := range realKeySet {
-				if !conservativeKeySet[k] {
-					missing = append(missing, k)
+				} else {
+					diffOnce := &llmDiffOnce
+					if !isLLM {
+						diffOnce = &preexecDiffOnce
+					}
+					diffOnce.Do(func() {
+						dumpAbortKeyDiff(txID, txIdx, isLLM, conservativeKeys, conservativeKeySet, realKeySet)
+					})
 				}
-			}
-			sort.Strings(missing)
-			src := "?"
-			if txIdx >= 0 && txIdx < len(stats.Sources) {
-				src = stats.Sources[txIdx]
-			}
-			// Raw tx info for diagnostics.
-			toAddr := ""
-			selector := ""
-			funcName := ""
-			if txIdx >= 0 && txIdx < len(rawTxs) {
-				toAddr = strings.ToLower(rawTxs[txIdx].To)
-				if len(rawTxs[txIdx].Input) >= 10 {
-					selector = strings.ToLower(rawTxs[txIdx].Input[:10])
-				}
-				if toAddr != "" && selector != "" {
-					if funcs, ferr := utils.ReadFuncsMap(toAddr); ferr == nil {
-						funcName = funcs[selector]
+				abortCountLock.Lock()
+				validationAborted++
+				abortCountLock.Unlock()
+				scheduler.Abort(txID)
+				serialReplayLock.Lock()
+				serialReplayList = append(serialReplayList, txID)
+				serialReplayLock.Unlock()
+				var missing []string
+				for k := range realKeySet {
+					if !conservativeKeySet[k] {
+						missing = append(missing, k)
 					}
 				}
+				sort.Strings(missing)
+				src := "?"
+				if txIdx >= 0 && txIdx < len(stats.Sources) {
+					src = stats.Sources[txIdx]
+				}
+				// Raw tx info for diagnostics.
+				toAddr := ""
+				selector := ""
+				funcName := ""
+				if txIdx >= 0 && txIdx < len(rawTxs) {
+					toAddr = strings.ToLower(rawTxs[txIdx].To)
+					if len(rawTxs[txIdx].Input) >= 10 {
+						selector = strings.ToLower(rawTxs[txIdx].Input[:10])
+					}
+					if toAddr != "" && selector != "" {
+						if funcs, ferr := utils.ReadFuncsMap(toAddr); ferr == nil {
+							funcName = funcs[selector]
+						}
+					}
+				}
+				fmt.Printf("  TX %s (txIdx=%d, to=%s, selector=%s, func=%s): aborted (real keys exceed conservative) - real=%d, conservative=%d, source=%s, missingKeys=%v\n",
+					txID, txIdx, toAddr, selector, funcName,
+					len(realKeySet), len(conservativeKeySet), src, missing)
+				return
 			}
-			fmt.Printf("  TX %s (txIdx=%d, to=%s, selector=%s, func=%s): aborted (real keys exceed conservative) - real=%d, conservative=%d, source=%s, missingKeys=%v\n",
-				txID, txIdx, toAddr, selector, funcName,
-				len(realKeySet), len(conservativeKeySet), src, missing)
-			return
-		}
 
-		// Prune spurious conservative keys (conservative ⊋ real).
-		pruned := 0
-		for _, k := range conservativeKeys {
-			if !realKeySet[k] {
-				pruned++
+			// Prune spurious conservative keys (conservative ⊋ real).
+			pruned := 0
+			for _, k := range conservativeKeys {
+				if !realKeySet[k] {
+					pruned++
+				}
 			}
-		}
-		abortCountLock.Lock()
-		totalPrunedKeys += pruned
-		abortCountLock.Unlock()
-		if pruned > 0 {
-			allRealKeys := make([]string, 0, len(result.RealReadKeys)+len(result.RealWriteKeys))
-			allRealKeys = append(allRealKeys, result.RealReadKeys...)
-			allRealKeys = append(allRealKeys, result.RealWriteKeys...)
-			scheduler.Prune(txID, allRealKeys)
-		}
+			abortCountLock.Lock()
+			totalPrunedKeys += pruned
+			abortCountLock.Unlock()
+			if pruned > 0 {
+				allRealKeys := make([]string, 0, len(result.RealReadKeys)+len(result.RealWriteKeys))
+				allRealKeys = append(allRealKeys, result.RealReadKeys...)
+				allRealKeys = append(allRealKeys, result.RealWriteKeys...)
+				scheduler.Prune(txID, allRealKeys)
+			}
 
-		scheduler.Execute(txID)
-		abortCountLock.Lock()
-		committed++
-		abortCountLock.Unlock()
+			scheduler.Execute(txID)
+			abortCountLock.Lock()
+			committed++
+			abortCountLock.Unlock()
 
-		// committedDelta stores the absolute post-exec value for each key
-		// written by any prior-committed tx, so the next ReExecute's
-		// applyStateOverride only touches these keys (small) instead of the
-		// full witness baseline (large).
-		committedDeltaLock.Lock()
-		for k, v := range result.WriteValues {
-			committedDelta[k] = v
-		}
-		committedDeltaLock.Unlock()
-	})
-	defer validatePool.Release()
+			// committedDelta stores the absolute post-exec value for each key
+			// written by any prior-committed tx, so the next ReExecute's
+			// applyStateOverride only touches these keys (small) instead of the
+			// full witness baseline (large).
+			committedDeltaLock.Lock()
+			for k, v := range result.WriteValues {
+				committedDelta[k] = v
+			}
+			committedDeltaLock.Unlock()
+		})
 
-	// Termination check order matters: read inProgress FIRST, then the queue
-	// lengths. A worker pushes successors to ready/pruneReady inside
-	// Execute/Abort/Prune and only afterwards decrements inProgress (defer).
-	// If inProgress is observed as 0, every push happened-before this read
-	// and no new push can occur (no worker is running), so the subsequent
-	// queue-length reads see frozen state and exiting is safe. Checking the
-	// queues first opened a window where the last worker pushed a successor
-	// and decremented between the two checks — the loop then exited with the
-	// successor still queued and the tx was silently dropped (observed: 20
-	// txs vanished in a 1961-tx run).
-	for {
-		if atomic.LoadInt32(&inProgress) == 0 &&
-			scheduler.GetReadyQueueLen() == 0 &&
-			scheduler.GetPruneReadyQueueLen() == 0 {
-			break
-		}
-
-		worked := false
+		// Termination check order matters: read inProgress FIRST, then the queue
+		// lengths. A worker pushes successors to ready/pruneReady inside
+		// Execute/Abort/Prune and only afterwards decrements inProgress (defer).
+		// If inProgress is observed as 0, every push happened-before this read
+		// and no new push can occur (no worker is running), so the subsequent
+		// queue-length reads see frozen state and exiting is safe. Checking the
+		// queues first opened a window where the last worker pushed a successor
+		// and decremented between the two checks — the loop then exited with the
+		// successor still queued and the tx was silently dropped (observed: 20
+		// txs vanished in a 1961-tx run).
 		for {
-			txID := scheduler.PopReady()
-			if txID == "" {
+			if atomic.LoadInt32(&inProgress) == 0 &&
+				scheduler.GetReadyQueueLen() == 0 &&
+				scheduler.GetPruneReadyQueueLen() == 0 {
 				break
 			}
-			atomic.AddInt32(&inProgress, 1)
-			_ = validatePool.Invoke(txID)
-			worked = true
-		}
 
-		for {
-			txID := scheduler.PopPruneReady()
-			if txID == "" {
-				break
+			worked := false
+			for {
+				txID := scheduler.PopReady()
+				if txID == "" {
+					break
+				}
+				atomic.AddInt32(&inProgress, 1)
+				_ = validatePool.Invoke(txID)
+				worked = true
 			}
-			atomic.AddInt32(&inProgress, 1)
-			_ = validatePool.Invoke(txID)
-			worked = true
-		}
 
-		// Idle spin: yield the P so workers can finish and push more work,
-		// instead of hammering the scheduler RLock in a tight loop.
-		if !worked {
-			runtime.Gosched()
+			for {
+				txID := scheduler.PopPruneReady()
+				if txID == "" {
+					break
+				}
+				atomic.AddInt32(&inProgress, 1)
+				_ = validatePool.Invoke(txID)
+				worked = true
+			}
+
+			// Idle spin: yield the P so workers can finish and push more work,
+			// instead of hammering the scheduler RLock in a tight loop.
+			if !worked {
+				runtime.Gosched()
+			}
 		}
+		execDur := time.Since(startExec)
+		totalExecDur += execDur
+		if nBlocks > 1 {
+			writer.WriteString(fmt.Sprintf("  block %d/%d: execution=%v\n", start/blockSize+1, nBlocks, execDur))
+		} else {
+			writer.WriteString(fmt.Sprintf("Time of execution: %v\n", execDur))
+		}
+		validatePool.Release()
+	} // end per-block schedule+validation loop
+
+	// Aggregate timing — algorithm time only. Block-splitting control
+	// overhead is excluded and reported separately.
+	if nBlocks > 1 {
+		writer.WriteString(fmt.Sprintf("Time of schedule (total): %v (%d blocks)\n", totalSchedDur, nBlocks))
+		writer.WriteString(fmt.Sprintf("Time of execution (total): %v (%d blocks)\n", totalExecDur, nBlocks))
+		writer.WriteString(fmt.Sprintf("Time of block control (NOT counted in algorithm time): %v\n", blockControlDur))
 	}
-	execDur := time.Since(startExec)
-	writer.WriteString(fmt.Sprintf("Time of execution: %v\n", execDur))
 
 	// --- Step 9: serial replay of aborted txs (sorted by TxID) ---
 	sort.Strings(serialReplayList)
@@ -1046,6 +1109,12 @@ func runReplayDepurgeMode(
 	// computation + writeback). Subsequent txs use PreExecuteCommit (no delta,
 	// no overlay — stateDB already carries accumulated writes). This skips
 	// collectDeltasAndValues for 106/107 txs, saving ~0.48ms/tx.
+	//
+	// Align with upstream ProcessSerial: per-tx Finalise (geth's
+	// applyTransaction calls statedb.Finalise after every tx on the Byzantium
+	// path) + end-of-block IntermediateRoot (trie root hash). Both sit inside
+	// the serial timer and are counted in serialDur.
+	var serialFinaliseDur time.Duration // per-tx Finalise (upstream ProcessSerial)
 	var firstDone bool
 	for _, txID := range serialReplayList {
 		txIdx, ok := txIDToIdx[txID]
@@ -1062,17 +1131,16 @@ func runReplayDepurgeMode(
 			if err != nil {
 				fmt.Printf("  TX %s: serial replay failed (%v)\n", txID, err)
 				firstDone = true
-				serialReplayed++
-				continue
-			}
-			if result != nil {
-				committedDeltaLock.Lock()
-				for k, v := range result.WriteValues {
-					committedDelta[k] = v
+			} else {
+				if result != nil {
+					committedDeltaLock.Lock()
+					for k, v := range result.WriteValues {
+						committedDelta[k] = v
+					}
+					committedDeltaLock.Unlock()
 				}
-				committedDeltaLock.Unlock()
+				firstDone = true
 			}
-			firstDone = true
 		} else {
 			// Subsequent txs: PreExecuteCommit (no delta, stateDB accumulates).
 			// committedDelta writeback is skipped because it is not read after
@@ -1083,11 +1151,19 @@ func runReplayDepurgeMode(
 			}
 		}
 		serialReplayed++
+
+		// Per-tx Finalise (upstream ProcessSerial) — finalised even on failed
+		// txs, matching geth. Duration feeds into serialDur.
+		if fDur, ferr := serialReplayer.FinaliseSerial(); ferr != nil {
+			fmt.Printf("  WARN: serial replay per-tx Finalise failed: %v\n", ferr)
+		} else {
+			serialFinaliseDur += fDur
+		}
 	}
-	serialDur := time.Since(startSerial)
+	serialDur := time.Since(startSerial) + serialFinaliseDur
 	// With --disk-commit, pay the real end-of-block trie flush so serial
 	// replay reflects the same commit cost as the serial baseline.
-	if diskCommit {
+	if diskCommit && serialReplayer != nil {
 		commitDur, cerr := serialReplayer.CommitTrie()
 		if cerr != nil {
 			fmt.Printf("  WARN: serial replay trie commit failed: %v\n", cerr)
@@ -1096,10 +1172,24 @@ func runReplayDepurgeMode(
 			writer.WriteString(fmt.Sprintf("  trie commit (serial replay): %v\n", commitDur))
 		}
 	}
+	// Without --disk-commit, pay the same end-of-block trie root hash that
+	// upstream ProcessSerial computes inside its serial timer (Finalise +
+	// updateRoot + (*trie).Hash() — no Commit, no disk flush).
+	// serialReplayer is lazily constructed (only when serialReplayList is
+	// non-empty); with zero aborts it is nil and there is nothing to hash.
+	if !diskCommit && serialReplayer != nil {
+		rootDur, rerr := serialReplayer.IntermediateRootHash()
+		if rerr != nil {
+			fmt.Printf("  WARN: serial replay trie root hash failed: %v\n", rerr)
+		} else {
+			serialDur += rootDur
+			writer.WriteString(fmt.Sprintf("  trie root hash (serial replay): %v\n", rootDur))
+		}
+	}
 	writer.WriteString(fmt.Sprintf("Time of serial replay: %v\n", serialDur))
 	writer.WriteString(fmt.Sprintf("Serial replayed: %d\n", serialReplayed))
 
-	writer.WriteString(fmt.Sprintf("Time of validation and execution: %v\n", time.Since(startExec)))
+	writer.WriteString(fmt.Sprintf("Time of validation and execution: %v\n", totalExecDur+serialDur))
 	writer.WriteString(fmt.Sprintf("Total pruned keys: %d\n", totalPrunedKeys))
 
 	// --- Step 10: report ---
@@ -1123,7 +1213,10 @@ func runReplayDepurgeMode(
 	//
 	// Uses a fresh in-memory levm so it doesn't disturb the pool's witness
 	// state. We re-inject witness from the dataset.
-	depurgeDur := time.Since(startPreAnalysis)
+	// Algorithm time only: pre-analysis + per-block schedule + per-block
+	// execution + serial replay. Block-splitting control overhead and other
+	// wall-clock gaps are excluded.
+	depurgeDur := preAnalysisDur + totalSchedDur + totalExecDur + serialDur
 
 	// Serial baseline: with --disk-commit use a real on-disk leveldb so the
 	// end-of-block trie commit pays actual disk-flush cost; with --disk-trie
@@ -1159,6 +1252,7 @@ func runReplayDepurgeMode(
 		}
 	}
 	var abortTxDur, committedTxDur time.Duration
+	var serialBaselineFinaliseDur time.Duration // per-tx Finalise (upstream ProcessSerial)
 	for txIdx := 0; txIdx < txCount; txIdx++ {
 		// Execute WITHOUT snapshot/revert — commit state between txs so
 		// later txs see earlier txs' writes. This is the true serial baseline.
@@ -1170,13 +1264,21 @@ func runReplayDepurgeMode(
 		} else {
 			committedTxDur += dur
 		}
+		// Per-tx Finalise (upstream ProcessSerial) — kept out of the
+		// abort/committed subset timing, but added to the total. Failed txs
+		// are finalised too (geth applies Finalise regardless of success).
+		if fDur, ferr := serialBaseline.FinaliseSerial(); ferr != nil {
+			fmt.Printf("  WARN: serial baseline per-tx Finalise failed: %v\n", ferr)
+		} else {
+			serialBaselineFinaliseDur += fDur
+		}
 		if err != nil || rw == nil || !rw.Success {
 			serialFail++
 			continue
 		}
 		serialOK++
 	}
-	serialBaselineDur := time.Since(startSerialBaseline)
+	serialBaselineDur := time.Since(startSerialBaseline) + serialBaselineFinaliseDur
 	// With --disk-commit, pay the real end-of-block trie flush so the serial
 	// baseline reflects a real node's commit cost (IntermediateRoot + Commit +
 	// leveldb flush), not just in-memory state accumulation.
@@ -1187,6 +1289,17 @@ func runReplayDepurgeMode(
 		} else {
 			serialBaselineDur += commitDur
 			writer.WriteString(fmt.Sprintf("  trie commit (serial baseline): %v\n", commitDur))
+		}
+	}
+	// Without --disk-commit, pay the same end-of-block trie root hash that
+	// upstream ProcessSerial computes inside its serial timer.
+	if !diskCommit {
+		rootDur, rerr := serialBaseline.IntermediateRootHash()
+		if rerr != nil {
+			fmt.Printf("  WARN: serial baseline trie root hash failed: %v\n", rerr)
+		} else {
+			serialBaselineDur += rootDur
+			writer.WriteString(fmt.Sprintf("  trie root hash (serial baseline): %v\n", rootDur))
 		}
 	}
 
@@ -1274,6 +1387,7 @@ func runReplayVegetaMode(
 	diskCommit bool,
 	trieDisk bool,
 	trieCacheMB int,
+	txsPerBlock int,
 ) error {
 	// --- Step 1: open dataset + load block range ---
 	ds, err := utils.NewDatasetReader(datasetDir)
@@ -1427,258 +1541,327 @@ func runReplayVegetaMode(
 		txToNodes[txID] = nodes
 	}
 
-	// --- Step 5: Dependency chain construction (TestVegeta Step 2) ---
-	// Build key → txIDs map, then chains, then orderedTxs.
-	startChain := time.Now()
-	keyToTxs := make(map[string][]string)
-	for txID := range speculativeRS {
-		for key := range speculativeRS[txID] {
-			keyToTxs[key] = append(keyToTxs[key], txID)
-		}
+	// --- Step 5-7: per-block chain + DAG + validation loop ---
+	//
+	// When txsPerBlock > 0, the tx stream (in original block order) is split
+	// into blocks of that size and chain ordering + DAG construction +
+	// batch validation run once per block — simulating one algorithm
+	// invocation per real block. This bounds the per-run scheduling cost
+	// (DAG conflict detection is O(txs²) worst case). Block-splitting
+	// CONTROL work (slicing, map building, loop bookkeeping) is timed
+	// separately (blockControlDur) and NOT counted in the algorithm timings.
+	//
+	// committedDelta / serialReplayList are shared across blocks: previous
+	// blocks' committed writes become the next block's overlay, and aborted
+	// txs from all blocks are serially replayed together after the loop.
+	orderedTxIDs := make([]string, 0, txCount)
+	for i := range specs {
+		orderedTxIDs = append(orderedTxIDs, block.Refs[i].TxHash)
 	}
-	for txID := range speculativeWS {
-		for key := range speculativeWS[txID] {
-			keyToTxs[key] = append(keyToTxs[key], txID)
-		}
+	blockSize := txsPerBlock
+	if blockSize <= 0 || blockSize >= txCount {
+		blockSize = txCount
 	}
-
-	var chains [][]string
-	for _, txIDs := range keyToTxs {
-		if len(txIDs) > 0 {
-			seen := make(map[string]bool)
-			var chain []string
-			for _, id := range txIDs {
-				if !seen[id] {
-					seen[id] = true
-					chain = append(chain, id)
-				}
-			}
-			chains = append(chains, chain)
-		}
-	}
-
-	sort.Slice(chains, func(i, j int) bool {
-		return len(chains[i]) > len(chains[j])
-	})
-
-	orderedTxs := make([]string, 0, txCount)
-	seenTxs := make(map[string]bool)
-	for _, chain := range chains {
-		for _, txID := range chain {
-			if !seenTxs[txID] {
-				orderedTxs = append(orderedTxs, txID)
-				seenTxs[txID] = true
-			}
-		}
-	}
-	for _, ref := range block.Refs {
-		if !seenTxs[ref.TxHash] {
-			orderedTxs = append(orderedTxs, ref.TxHash)
-			seenTxs[ref.TxHash] = true
-		}
-	}
-
-	chainDur := time.Since(startChain)
-	writer.WriteString(fmt.Sprintf("Time of speculation (chain ordering): %v\n", chainDur))
-	writer.Flush()
-
-	// --- Step 6: Build DAG (TestVegeta Step 3) ---
-	// For each tx in orderedTxs, find predecessors by conflict detection.
-	startDAG := time.Now()
-	dag := make(map[string][]string, txCount)
-	for i, txID := range orderedTxs {
-		var predecessors []string
-		for j := 0; j < i; j++ {
-			prevTxID := orderedTxs[j]
-			hasConflict := false
-
-			// W-W conflict
-			for key := range speculativeWS[txID] {
-				if speculativeWS[prevTxID][key] {
-					hasConflict = true
-					break
-				}
-			}
-			if !hasConflict {
-				// R-W conflict (tx reads what prev writes)
-				for key := range speculativeRS[txID] {
-					if speculativeWS[prevTxID][key] {
-						hasConflict = true
-						break
-					}
-				}
-			}
-			if !hasConflict {
-				// W-R conflict (tx writes what prev reads)
-				for key := range speculativeWS[txID] {
-					if speculativeRS[prevTxID][key] {
-						hasConflict = true
-						break
-					}
-				}
-			}
-			if hasConflict {
-				predecessors = append(predecessors, prevTxID)
-			}
-		}
-		dag[txID] = predecessors
-	}
-	dagDur := time.Since(startDAG)
-	writer.WriteString(fmt.Sprintf("Time of DAG construction: %v\n", dagDur))
-	writer.Flush()
-
-	// --- Step 7: Validation loop (batch-level, TestVegeta Step 4) ---
-	// committedDelta stores ONLY the keys written by previously-committed
-	// txs (incremental overlay). The witness baseline lives in each worker's
-	// stateDB (injected once at pool init).
-	startExec := time.Now()
-	committedDelta := make(map[string]string)
-	var committedDeltaLock sync.RWMutex
-
-	executed := make(map[string]bool, txCount)
-	remaining := make(map[string]bool, txCount)
-	for _, txID := range orderedTxs {
-		remaining[txID] = true
-	}
-
+	nBlocks := (txCount + blockSize - 1) / blockSize
+	var totalChainDur, totalDAGDur, totalExecDur, blockControlDur time.Duration
 	var serialReplayList []string
 	algorithmAborted := 0
 	var noContextCount int32
 	var reexecErrorCount int32
+	committedDelta := make(map[string]string)
+	var committedDeltaLock sync.RWMutex
 
-	for len(remaining) > 0 {
-		// Find ready txs (all predecessors executed).
-		var batch []string
-		for txID := range remaining {
-			ready := true
-			for _, pred := range dag[txID] {
-				if !executed[pred] {
-					ready = false
-					break
-				}
+	for start := 0; start < txCount; start += blockSize {
+		end := start + blockSize
+		if end > txCount {
+			end = txCount
+		}
+
+		// Control work (excluded from algorithm timing): slice this block's
+		// txIDs and build its speculative RS/WS subsets.
+		ctlStart := time.Now()
+		blockIDs := orderedTxIDs[start:end]
+		blockRS := make(map[string]map[string]bool, len(blockIDs))
+		blockWS := make(map[string]map[string]bool, len(blockIDs))
+		for _, id := range blockIDs {
+			if rs, ok := speculativeRS[id]; ok {
+				blockRS[id] = rs
 			}
-			if ready {
-				batch = append(batch, txID)
+			if ws, ok := speculativeWS[id]; ok {
+				blockWS[id] = ws
+			}
+		}
+		blockControlDur += time.Since(ctlStart)
+
+		// Algorithm time: dependency chain construction for this block.
+		// Build key → txIDs map, then chains, then orderedTxs.
+		startChain := time.Now()
+		keyToTxs := make(map[string][]string)
+		for txID := range blockRS {
+			for key := range blockRS[txID] {
+				keyToTxs[key] = append(keyToTxs[key], txID)
+			}
+		}
+		for txID := range blockWS {
+			for key := range blockWS[txID] {
+				keyToTxs[key] = append(keyToTxs[key], txID)
 			}
 		}
 
-		if len(batch) == 0 {
-			break
+		var chains [][]string
+		for _, txIDs := range keyToTxs {
+			if len(txIDs) > 0 {
+				seen := make(map[string]bool)
+				var chain []string
+				for _, id := range txIDs {
+					if !seen[id] {
+						seen[id] = true
+						chain = append(chain, id)
+					}
+				}
+				chains = append(chains, chain)
+			}
 		}
 
-		// Deterministic batch ordering.
-		sort.Strings(batch)
+		sort.Slice(chains, func(i, j int) bool {
+			return len(chains[i]) > len(chains[j])
+		})
 
-		// Batch-level snapshot: all txs in this batch see the same
-		// committedDelta (witness baseline + prior committed txs' writes).
-		committedDeltaLock.RLock()
-		overlaySnapshot := cloneStringMap(committedDelta)
-		committedDeltaLock.RUnlock()
-
-		batchResults := make(map[string]bool)
-		batchWriteValues := make(map[string]map[string]string)
-		var resultsLock sync.Mutex
-		var wg sync.WaitGroup
-
-		validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
-			txID := i.(string)
-			defer wg.Done()
-
-			txIdx, ok := txIDToIdx[txID]
-			if !ok {
-				atomic.AddInt32(&noContextCount, 1)
-				resultsLock.Lock()
-				batchResults[txID] = false
-				resultsLock.Unlock()
-				return
-			}
-
-			worker, err := levmPool.Acquire()
-			if err != nil {
-				atomic.AddInt32(&reexecErrorCount, 1)
-				resultsLock.Lock()
-				batchResults[txID] = false
-				resultsLock.Unlock()
-				fmt.Printf("  TX %s: aborted (worker acquire error: %v)\n", txID, err)
-				return
-			}
-			defer levmPool.Release(worker)
-
-			result, err := worker.ReExecute(fromBlock, txIdx, overlaySnapshot)
-			if err != nil {
-				atomic.AddInt32(&reexecErrorCount, 1)
-				resultsLock.Lock()
-				batchResults[txID] = false
-				resultsLock.Unlock()
-				serialReplayList = append(serialReplayList, txID)
-				fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
-				return
-			}
-
-			// Check: real keys ⊆ speculative keys?
-			preRS := speculativeRS[txID]
-			preWS := speculativeWS[txID]
-
-			match := true
-			for _, key := range result.RealReadKeys {
-				if !preRS[key] {
-					match = false
-					break
+		orderedTxs := make([]string, 0, len(blockIDs))
+		seenTxs := make(map[string]bool)
+		for _, chain := range chains {
+			for _, txID := range chain {
+				if !seenTxs[txID] {
+					orderedTxs = append(orderedTxs, txID)
+					seenTxs[txID] = true
 				}
 			}
-			if match {
-				for _, key := range result.RealWriteKeys {
-					if !preWS[key] {
+		}
+		for _, id := range blockIDs {
+			if !seenTxs[id] {
+				orderedTxs = append(orderedTxs, id)
+				seenTxs[id] = true
+			}
+		}
+
+		chainDur := time.Since(startChain)
+		totalChainDur += chainDur
+		if nBlocks > 1 {
+			writer.WriteString(fmt.Sprintf("  block %d/%d: chain ordering=%v\n", start/blockSize+1, nBlocks, chainDur))
+		} else {
+			writer.WriteString(fmt.Sprintf("Time of speculation (chain ordering): %v\n", chainDur))
+		}
+		writer.Flush()
+
+		// Algorithm time: DAG construction for this block.
+		// For each tx in orderedTxs, find predecessors by conflict detection.
+		startDAG := time.Now()
+		dag := make(map[string][]string, len(orderedTxs))
+		for i, txID := range orderedTxs {
+			var predecessors []string
+			for j := 0; j < i; j++ {
+				prevTxID := orderedTxs[j]
+				hasConflict := false
+
+				// W-W conflict
+				for key := range blockWS[txID] {
+					if blockWS[prevTxID][key] {
+						hasConflict = true
+						break
+					}
+				}
+				if !hasConflict {
+					// R-W conflict (tx reads what prev writes)
+					for key := range blockRS[txID] {
+						if blockWS[prevTxID][key] {
+							hasConflict = true
+							break
+						}
+					}
+				}
+				if !hasConflict {
+					// W-R conflict (tx writes what prev reads)
+					for key := range blockWS[txID] {
+						if blockRS[prevTxID][key] {
+							hasConflict = true
+							break
+						}
+					}
+				}
+				if hasConflict {
+					predecessors = append(predecessors, prevTxID)
+				}
+			}
+			dag[txID] = predecessors
+		}
+		dagDur := time.Since(startDAG)
+		totalDAGDur += dagDur
+		if nBlocks > 1 {
+			writer.WriteString(fmt.Sprintf("  block %d/%d: DAG=%v\n", start/blockSize+1, nBlocks, dagDur))
+		} else {
+			writer.WriteString(fmt.Sprintf("Time of DAG construction: %v\n", dagDur))
+		}
+		writer.Flush()
+
+		// Algorithm time: validation loop for this block (batch-level).
+		// committedDelta stores ONLY the keys written by previously-committed
+		// txs (incremental overlay). The witness baseline lives in each
+		// worker's stateDB (injected once at pool init).
+		startExec := time.Now()
+		executed := make(map[string]bool, len(orderedTxs))
+		remaining := make(map[string]bool, len(orderedTxs))
+		for _, txID := range orderedTxs {
+			remaining[txID] = true
+		}
+
+		for len(remaining) > 0 {
+			// Find ready txs (all predecessors executed).
+			var batch []string
+			for txID := range remaining {
+				ready := true
+				for _, pred := range dag[txID] {
+					if !executed[pred] {
+						ready = false
+						break
+					}
+				}
+				if ready {
+					batch = append(batch, txID)
+				}
+			}
+
+			if len(batch) == 0 {
+				break
+			}
+
+			// Deterministic batch ordering.
+			sort.Strings(batch)
+
+			// Batch-level snapshot: all txs in this batch see the same
+			// committedDelta (witness baseline + prior committed txs' writes).
+			committedDeltaLock.RLock()
+			overlaySnapshot := cloneStringMap(committedDelta)
+			committedDeltaLock.RUnlock()
+
+			batchResults := make(map[string]bool)
+			batchWriteValues := make(map[string]map[string]string)
+			var resultsLock sync.Mutex
+			var wg sync.WaitGroup
+
+			validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
+				txID := i.(string)
+				defer wg.Done()
+
+				txIdx, ok := txIDToIdx[txID]
+				if !ok {
+					atomic.AddInt32(&noContextCount, 1)
+					resultsLock.Lock()
+					batchResults[txID] = false
+					resultsLock.Unlock()
+					return
+				}
+
+				worker, err := levmPool.Acquire()
+				if err != nil {
+					atomic.AddInt32(&reexecErrorCount, 1)
+					resultsLock.Lock()
+					batchResults[txID] = false
+					resultsLock.Unlock()
+					fmt.Printf("  TX %s: aborted (worker acquire error: %v)\n", txID, err)
+					return
+				}
+				defer levmPool.Release(worker)
+
+				result, err := worker.ReExecute(fromBlock, txIdx, overlaySnapshot)
+				if err != nil {
+					atomic.AddInt32(&reexecErrorCount, 1)
+					resultsLock.Lock()
+					batchResults[txID] = false
+					resultsLock.Unlock()
+					serialReplayList = append(serialReplayList, txID)
+					fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
+					return
+				}
+
+				// Check: real keys ⊆ speculative keys?
+				preRS := blockRS[txID]
+				preWS := blockWS[txID]
+
+				match := true
+				for _, key := range result.RealReadKeys {
+					if !preRS[key] {
 						match = false
 						break
 					}
 				}
-			}
-
-			if !match {
-				resultsLock.Lock()
-				batchResults[txID] = false
-				resultsLock.Unlock()
-				serialReplayList = append(serialReplayList, txID)
-				fmt.Printf("  TX %s: aborted (real keys exceed conservative) - real=%d, conservative=%d\n",
-					txID, len(result.RealReadKeys)+len(result.RealWriteKeys),
-					len(preRS)+len(preWS))
-				return
-			}
-
-			resultsLock.Lock()
-			batchResults[txID] = true
-			batchWriteValues[txID] = result.WriteValues
-			resultsLock.Unlock()
-		})
-
-		for _, txID := range batch {
-			wg.Add(1)
-			_ = validatePool.Invoke(txID)
-		}
-		wg.Wait()
-		validatePool.Release()
-
-		// Merge successful txs' WriteValues into committedDelta.
-		// Failed txs are removed from remaining but NOT merged — they
-		// will be replayed serially in Step 8.
-		for _, txID := range batch {
-			delete(remaining, txID)
-			executed[txID] = true
-			if batchResults[txID] {
-				committedDeltaLock.Lock()
-				for k, v := range batchWriteValues[txID] {
-					committedDelta[k] = v
+				if match {
+					for _, key := range result.RealWriteKeys {
+						if !preWS[key] {
+							match = false
+							break
+						}
+					}
 				}
-				committedDeltaLock.Unlock()
-			} else {
-				algorithmAborted++
+
+				if !match {
+					resultsLock.Lock()
+					batchResults[txID] = false
+					resultsLock.Unlock()
+					serialReplayList = append(serialReplayList, txID)
+					fmt.Printf("  TX %s: aborted (real keys exceed conservative) - real=%d, conservative=%d\n",
+						txID, len(result.RealReadKeys)+len(result.RealWriteKeys),
+						len(preRS)+len(preWS))
+					return
+				}
+
+				resultsLock.Lock()
+				batchResults[txID] = true
+				batchWriteValues[txID] = result.WriteValues
+				resultsLock.Unlock()
+			})
+
+			for _, txID := range batch {
+				wg.Add(1)
+				_ = validatePool.Invoke(txID)
+			}
+			wg.Wait()
+			validatePool.Release()
+
+			// Merge successful txs' WriteValues into committedDelta.
+			// Failed txs are removed from remaining but NOT merged — they
+			// will be replayed serially in Step 8.
+			for _, txID := range batch {
+				delete(remaining, txID)
+				executed[txID] = true
+				if batchResults[txID] {
+					committedDeltaLock.Lock()
+					for k, v := range batchWriteValues[txID] {
+						committedDelta[k] = v
+					}
+					committedDeltaLock.Unlock()
+				} else {
+					algorithmAborted++
+				}
 			}
 		}
-	}
 
-	execDur := time.Since(startExec)
-	writer.WriteString(fmt.Sprintf("Time of replay (validation): %v\n", execDur))
+		execDur := time.Since(startExec)
+		totalExecDur += execDur
+		if nBlocks > 1 {
+			writer.WriteString(fmt.Sprintf("  block %d/%d: execution=%v\n", start/blockSize+1, nBlocks, execDur))
+		} else {
+			writer.WriteString(fmt.Sprintf("Time of replay (validation): %v\n", execDur))
+		}
+	} // end per-block chain+DAG+validation loop
+
+	// Aggregate timing — algorithm time only. Block-splitting control
+	// overhead is excluded and reported separately.
+	if nBlocks > 1 {
+		writer.WriteString(fmt.Sprintf("Time of speculation (chain ordering, total): %v (%d blocks)\n", totalChainDur, nBlocks))
+		writer.WriteString(fmt.Sprintf("Time of DAG construction (total): %v (%d blocks)\n", totalDAGDur, nBlocks))
+		writer.WriteString(fmt.Sprintf("Time of replay (validation, total): %v (%d blocks)\n", totalExecDur, nBlocks))
+		writer.WriteString(fmt.Sprintf("Time of block control (NOT counted in algorithm time): %v\n", blockControlDur))
+	}
 
 	// --- Step 8: Serial replay of aborted txs (sorted by TxID) ---
 	// Mirrors TestVegeta Step 5: aborted txs execute serially with state
@@ -1725,6 +1908,10 @@ func runReplayVegetaMode(
 
 	// First tx: apply committedDelta overlay via ReExecuteCommit.
 	// Subsequent txs: PreExecuteCommit (stateDB already carries accumulated writes).
+	//
+	// Align with upstream ProcessSerial: per-tx Finalise + end-of-block
+	// IntermediateRoot (trie root hash), both inside the serial timer.
+	var serialFinaliseDur time.Duration // per-tx Finalise (upstream ProcessSerial)
 	var firstDone bool
 	for _, txID := range serialReplayList {
 		txIdx, ok := txIDToIdx[txID]
@@ -1741,28 +1928,35 @@ func runReplayVegetaMode(
 			if err != nil {
 				fmt.Printf("  TX %s: serial replay failed (%v)\n", txID, err)
 				firstDone = true
-				serialReplayed++
-				continue
-			}
-			if result != nil {
-				committedDeltaLock.Lock()
-				for k, v := range result.WriteValues {
-					committedDelta[k] = v
+			} else {
+				if result != nil {
+					committedDeltaLock.Lock()
+					for k, v := range result.WriteValues {
+						committedDelta[k] = v
+					}
+					committedDeltaLock.Unlock()
 				}
-				committedDeltaLock.Unlock()
+				firstDone = true
 			}
-			firstDone = true
 		} else {
 			if _, err := serialReplayer.PreExecuteCommit(fromBlock, txIdx); err != nil {
 				fmt.Printf("  TX %s: serial replay failed (%v)\n", txID, err)
 			}
 		}
 		serialReplayed++
+
+		// Per-tx Finalise (upstream ProcessSerial) — finalised even on failed
+		// txs, matching geth. Duration feeds into serialDur.
+		if fDur, ferr := serialReplayer.FinaliseSerial(); ferr != nil {
+			fmt.Printf("  WARN: serial replay per-tx Finalise failed: %v\n", ferr)
+		} else {
+			serialFinaliseDur += fDur
+		}
 	}
-	serialDur := time.Since(startSerial)
+	serialDur := time.Since(startSerial) + serialFinaliseDur
 	// With --disk-commit, pay the real end-of-block trie flush so serial
 	// replay reflects the same commit cost as the serial baseline.
-	if diskCommit {
+	if diskCommit && serialReplayer != nil {
 		commitDur, cerr := serialReplayer.CommitTrie()
 		if cerr != nil {
 			fmt.Printf("  WARN: serial replay trie commit failed: %v\n", cerr)
@@ -1771,15 +1965,32 @@ func runReplayVegetaMode(
 			writer.WriteString(fmt.Sprintf("  trie commit (serial replay): %v\n", commitDur))
 		}
 	}
+	// Without --disk-commit, pay the same end-of-block trie root hash that
+	// upstream ProcessSerial computes inside its serial timer (Finalise +
+	// updateRoot + (*trie).Hash() — no Commit, no disk flush).
+	// serialReplayer is lazily constructed (only when serialReplayList is
+	// non-empty); with zero aborts it is nil and there is nothing to hash.
+	if !diskCommit && serialReplayer != nil {
+		rootDur, rerr := serialReplayer.IntermediateRootHash()
+		if rerr != nil {
+			fmt.Printf("  WARN: serial replay trie root hash failed: %v\n", rerr)
+		} else {
+			serialDur += rootDur
+			writer.WriteString(fmt.Sprintf("  trie root hash (serial replay): %v\n", rootDur))
+		}
+	}
 	writer.WriteString(fmt.Sprintf("Time of serial replay: %v\n", serialDur))
 	writer.WriteString(fmt.Sprintf("Serial replayed: %d\n", serialReplayed))
 
-	writer.WriteString(fmt.Sprintf("Time of validation and execution: %v\n", time.Since(startExec)))
+	writer.WriteString(fmt.Sprintf("Time of validation and execution: %v\n", totalExecDur+serialDur))
 
 	// --- Step 9: Baseline serial execution + report ---
 	// Mirrors Depurge's baseline: fresh levm, serial PreExecuteCommit for
 	// every tx, measures Vegeta's speedup vs pure serial.
-	vegetaDur := preAnalysisDur + execDur + serialDur + dagDur
+	// Algorithm time only: pre-analysis + per-block chain + DAG + execution +
+	// serial replay. Block-splitting control overhead and other wall-clock
+	// gaps are excluded.
+	vegetaDur := preAnalysisDur + totalChainDur + totalDAGDur + totalExecDur + serialDur
 
 	// Serial baseline: with --disk-commit use a real on-disk leveldb so the
 	// end-of-block trie commit pays actual disk-flush cost; with --disk-trie
@@ -1805,15 +2016,23 @@ func runReplayVegetaMode(
 
 	startBaseline := time.Now()
 	serialOK, serialFail := 0, 0
+	var serialBaselineFinaliseDur time.Duration // per-tx Finalise (upstream ProcessSerial)
 	for txIdx := 0; txIdx < txCount; txIdx++ {
 		rw, err := serialBaseline.PreExecuteCommit(fromBlock, txIdx)
+		// Per-tx Finalise (upstream ProcessSerial) — added to the total.
+		// Failed txs are finalised too (geth applies Finalise regardless).
+		if fDur, ferr := serialBaseline.FinaliseSerial(); ferr != nil {
+			fmt.Printf("  WARN: serial baseline per-tx Finalise failed: %v\n", ferr)
+		} else {
+			serialBaselineFinaliseDur += fDur
+		}
 		if err != nil || rw == nil || !rw.Success {
 			serialFail++
 			continue
 		}
 		serialOK++
 	}
-	serialBaselineDur := time.Since(startBaseline)
+	serialBaselineDur := time.Since(startBaseline) + serialBaselineFinaliseDur
 	// With --disk-commit, pay the real end-of-block trie flush so the serial
 	// baseline reflects a real node's commit cost (IntermediateRoot + Commit +
 	// leveldb flush), not just in-memory state accumulation.
@@ -1824,6 +2043,17 @@ func runReplayVegetaMode(
 		} else {
 			serialBaselineDur += commitDur
 			writer.WriteString(fmt.Sprintf("  trie commit (serial baseline): %v\n", commitDur))
+		}
+	}
+	// Without --disk-commit, pay the same end-of-block trie root hash that
+	// upstream ProcessSerial computes inside its serial timer.
+	if !diskCommit {
+		rootDur, rerr := serialBaseline.IntermediateRootHash()
+		if rerr != nil {
+			fmt.Printf("  WARN: serial baseline trie root hash failed: %v\n", rerr)
+		} else {
+			serialBaselineDur += rootDur
+			writer.WriteString(fmt.Sprintf("  trie root hash (serial baseline): %v\n", rootDur))
 		}
 	}
 

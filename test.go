@@ -110,11 +110,13 @@ func main() {
 	var blockNumStr string
 	var replayDepurge bool
 	var replayVegeta bool
+	var txsPerBlock int
 	flag.StringVar(&replaydURL, "replayd", "", "eth-replayd HTTP endpoint (enables replay mode)")
 	flag.StringVar(&datasetDir, "dataset", "", "Path to mainnet dataset directory (replay mode)")
 	flag.StringVar(&blockNumStr, "block-num", "24000000", "Block number or range a-b to replay (replay mode)")
 	flag.BoolVar(&replayDepurge, "replay-depurge", false, "Run pure-levm Depurge on mainnet block (no HTTP, uses LLM static analysis + LevmSpecFallback)")
 	flag.BoolVar(&replayVegeta, "replay-vegeta", false, "Run pure-levm Vegeta on mainnet block (no HTTP, uses EVM PreExecute + LevmSpecFallback)")
+	flag.IntVar(&txsPerBlock, "txs-per-block", 0, "Split the tx stream into blocks of this many txs and run Depurge_schedule / DAG construction + validation per block (simulates one algorithm run per real block). Bounds per-run scheduling complexity; 0 = all txs in one block (current behaviour). Block-splitting control overhead is measured separately and NOT counted in algorithm time (replay-depurge / replay-vegeta)")
 	var stateLatency time.Duration
 	flag.DurationVar(&stateLatency, "state-latency", 0, "Simulated trie cold-read latency per (addr,slot) first touch (e.g. 500us); 0 disables (replay-depurge / replay-vegeta)")
 	var diskCommit bool
@@ -157,14 +159,14 @@ func main() {
 		if replayDepurge {
 			w.WriteString(fmt.Sprintf("\n>>> Replay Depurge <<<\n"))
 			w.Flush()
-			if err := runReplayDepurgeMode(w, datasetDir, fromBlock, toBlock, stateLatency, diskCommit, trieDisk, trieCacheMB); err != nil {
+			if err := runReplayDepurgeMode(w, datasetDir, fromBlock, toBlock, stateLatency, diskCommit, trieDisk, trieCacheMB, txsPerBlock); err != nil {
 				log.Fatalf("replay depurge mode: %v", err)
 			}
 		}
 		if replayVegeta {
 			w.WriteString(fmt.Sprintf("\n>>> Replay Vegeta <<<\n"))
 			w.Flush()
-			if err := runReplayVegetaMode(w, datasetDir, fromBlock, toBlock, stateLatency, diskCommit, trieDisk, trieCacheMB); err != nil {
+			if err := runReplayVegetaMode(w, datasetDir, fromBlock, toBlock, stateLatency, diskCommit, trieDisk, trieCacheMB, txsPerBlock); err != nil {
 				log.Fatalf("replay vegeta mode: %v", err)
 			}
 		}

@@ -785,6 +785,41 @@ func (f *LevmSpecFallback) CommitTrie() (time.Duration, error) {
 	return time.Since(start), nil
 }
 
+// FinaliseSerial mirrors upstream ProcessSerial's per-tx behaviour: geth's
+// applyTransaction calls statedb.Finalise(true) after every tx (Byzantium
+// path). It merges the current tx's dirty journal into the in-memory state
+// objects and clears the journal, so the next tx reads the merged state.
+// Returns the elapsed time.
+func (f *LevmSpecFallback) FinaliseSerial() (time.Duration, error) {
+	if f == nil || f.lvm == nil {
+		return 0, fmt.Errorf("LevmSpecFallback: lvm not initialized")
+	}
+	sdb := f.lvm.GetStateDB()
+	if sdb == nil {
+		return 0, fmt.Errorf("LevmSpecFallback: stateDB not initialized")
+	}
+	start := time.Now()
+	sdb.Finalise(true) // EIP-158: modern mainnet blocks
+	return time.Since(start), nil
+}
+
+// IntermediateRootHash mirrors upstream ProcessSerial's end-of-block
+// statedb.IntermediateRoot(...) which sits INSIDE its serial timer:
+// Finalise + updateRoot + (*trie).Hash(). Only computes the root hash — no
+// Commit, no disk flush. Returns the elapsed time.
+func (f *LevmSpecFallback) IntermediateRootHash() (time.Duration, error) {
+	if f == nil || f.lvm == nil {
+		return 0, fmt.Errorf("LevmSpecFallback: lvm not initialized")
+	}
+	sdb := f.lvm.GetStateDB()
+	if sdb == nil {
+		return 0, fmt.Errorf("LevmSpecFallback: stateDB not initialized")
+	}
+	start := time.Now()
+	sdb.IntermediateRoot(true)
+	return time.Since(start), nil
+}
+
 // SetAccessLatency forwards the simulated trie cold-read latency to the
 // underlying levm. Must be called after construction and before the first
 // PreExecute/ReExecute. nil disables.

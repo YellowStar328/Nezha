@@ -859,11 +859,12 @@ func applyLogicalStateToContract(
 	logicalState map[string][]byte,
 ) error {
 	stateDB := lvm.GetStateDB()
-	for keyHex, value := range logicalState {
-		keyBytes, err := hex.DecodeString(keyHex)
-		if err != nil {
-			return err
-		}
+	for storageKeyStr, value := range logicalState {
+		// storageKeyStr is string(storageKeyBytes) from core.ConvertByte2String,
+		// NOT a hex-encoded string — recover the raw 32-byte key directly.
+		// (The previous hex.DecodeString produced "encoding/hex: invalid byte"
+		// once any committed tx wrote a storage key containing non-hex bytes.)
+		keyBytes := []byte(storageKeyStr)
 		stateDB.SetState(contractAddr, common.BytesToHash(keyBytes), common.BytesToHash(value))
 	}
 	return nil

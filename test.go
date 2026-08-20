@@ -115,6 +115,14 @@ func main() {
 	flag.StringVar(&blockNumStr, "block-num", "24000000", "Block number or range a-b to replay (replay mode)")
 	flag.BoolVar(&replayDepurge, "replay-depurge", false, "Run pure-levm Depurge on mainnet block (no HTTP, uses LLM static analysis + LevmSpecFallback)")
 	flag.BoolVar(&replayVegeta, "replay-vegeta", false, "Run pure-levm Vegeta on mainnet block (no HTTP, uses EVM PreExecute + LevmSpecFallback)")
+	var stateLatency time.Duration
+	flag.DurationVar(&stateLatency, "state-latency", 0, "Simulated trie cold-read latency per (addr,slot) first touch (e.g. 500us); 0 disables (replay-depurge / replay-vegeta)")
+	var diskCommit bool
+	flag.BoolVar(&diskCommit, "disk-commit", false, "Back serial baseline / serial replay with real on-disk leveldb + end-of-block trie commit (IntermediateRoot+Commit+leveldb flush); simulates real node commit cost (replay-depurge / replay-vegeta)")
+	var trieDisk bool
+	flag.BoolVar(&trieDisk, "disk-trie", false, "Encode the witness as a REAL Merkle Patricia Trie on a shared on-disk leveldb and read state through fresh (empty-cache) StateDBs: real trie traversal + genuine cold node loads from disk, no simulated latency (replay-depurge / replay-vegeta)")
+	var trieCacheMB int
+	flag.IntVar(&trieCacheMB, "trie-cache", 512, "Shared trie node cache size in MB for -disk-trie mode. All workers share one trie.Database, so a node loaded by any worker is warm for the others (mirrors a full node's shared trie cache). 0 disables the cache (old per-worker cold-cache semantics) (replay-depurge / replay-vegeta)")
 	flag.Parse()
 
 	// Parse block-num: either "N" (single block) or "A-B" (range).
@@ -149,14 +157,14 @@ func main() {
 		if replayDepurge {
 			w.WriteString(fmt.Sprintf("\n>>> Replay Depurge <<<\n"))
 			w.Flush()
-			if err := runReplayDepurgeMode(w, datasetDir, fromBlock, toBlock); err != nil {
+			if err := runReplayDepurgeMode(w, datasetDir, fromBlock, toBlock, stateLatency, diskCommit, trieDisk, trieCacheMB); err != nil {
 				log.Fatalf("replay depurge mode: %v", err)
 			}
 		}
 		if replayVegeta {
 			w.WriteString(fmt.Sprintf("\n>>> Replay Vegeta <<<\n"))
 			w.Flush()
-			if err := runReplayVegetaMode(w, datasetDir, fromBlock, toBlock); err != nil {
+			if err := runReplayVegetaMode(w, datasetDir, fromBlock, toBlock, stateLatency, diskCommit, trieDisk, trieCacheMB); err != nil {
 				log.Fatalf("replay vegeta mode: %v", err)
 			}
 		}
@@ -1024,22 +1032,29 @@ func TestDepurge(txList []utils.Transaction, writer *bufio.Writer, dbFile string
 	defer validatePool.Release()
 
 	for scheduler.GetReadyQueueLen() > 0 || scheduler.GetPruneReadyQueueLen() > 0 || atomic.LoadInt32(&inProgress) > 0 {
-		for scheduler.GetReadyQueueLen() > 0 {
+		worked := false
+		for {
 			txID := scheduler.PopReady()
 			if txID == "" {
 				break
 			}
 			atomic.AddInt32(&inProgress, 1)
 			_ = validatePool.Invoke(txID)
+			worked = true
 		}
 
-		for scheduler.GetPruneReadyQueueLen() > 0 {
+		for {
 			txID := scheduler.PopPruneReady()
 			if txID == "" {
 				break
 			}
 			atomic.AddInt32(&inProgress, 1)
 			_ = validatePool.Invoke(txID)
+			worked = true
+		}
+
+		if !worked {
+			runtime.Gosched()
 		}
 	}
 	duration_exe := time.Since(start_exe)

@@ -90,6 +90,11 @@ type DepurgeScheduler struct {
 	readyQueue      *list.List
 	pruneReadyQueue *list.List
 	txReadyCount    map[string]int
+	// inReady / inPruneReady mirror the membership of readyQueue /
+	// pruneReadyQueue so dedup checks are O(1) instead of a linear scan.
+	// Kept strictly in sync under mu: set on push, deleted on pop.
+	inReady      map[string]bool
+	inPruneReady map[string]bool
 }
 
 func NewDepurgeScheduler() *DepurgeScheduler {
@@ -100,6 +105,8 @@ func NewDepurgeScheduler() *DepurgeScheduler {
 		readyQueue:      list.New(),
 		pruneReadyQueue: list.New(),
 		txReadyCount:    make(map[string]int),
+		inReady:         make(map[string]bool),
+		inPruneReady:    make(map[string]bool),
 	}
 }
 
@@ -122,6 +129,7 @@ func (ds *DepurgeScheduler) addTransaction(txID string, keys []string) {
 
 	if ds.txReadyCount[txID] == 0 {
 		ds.readyQueue.PushBack(txID)
+		ds.inReady[txID] = true
 	}
 }
 
@@ -199,17 +207,9 @@ func (ds *DepurgeScheduler) Execute(txID string) {
 			nextTx := queue.front()
 			if nextTx != "" && !ds.txExecuted[nextTx] {
 				ds.txReadyCount[nextTx]--
-				if ds.txReadyCount[nextTx] == 0 {
-					isAlreadyInReady := false
-					for elem := ds.readyQueue.Front(); elem != nil; elem = elem.Next() {
-						if elem.Value.(string) == nextTx {
-							isAlreadyInReady = true
-							break
-						}
-					}
-					if !isAlreadyInReady {
-						ds.readyQueue.PushBack(nextTx)
-					}
+				if ds.txReadyCount[nextTx] == 0 && !ds.inReady[nextTx] {
+					ds.readyQueue.PushBack(nextTx)
+					ds.inReady[nextTx] = true
 				}
 			}
 		}
@@ -234,24 +234,9 @@ func (ds *DepurgeScheduler) Abort(txID string) {
 			nextTx := queue.front()
 			if nextTx != "" && !ds.txExecuted[nextTx] {
 				ds.txReadyCount[nextTx]--
-				if ds.txReadyCount[nextTx] == 0 {
-					isAlreadyInReady := false
-					for elem := ds.readyQueue.Front(); elem != nil; elem = elem.Next() {
-						if elem.Value.(string) == nextTx {
-							isAlreadyInReady = true
-							break
-						}
-					}
-					isAlreadyInPruneReady := false
-					for elem := ds.pruneReadyQueue.Front(); elem != nil; elem = elem.Next() {
-						if elem.Value.(string) == nextTx {
-							isAlreadyInPruneReady = true
-							break
-						}
-					}
-					if !isAlreadyInReady && !isAlreadyInPruneReady {
-						ds.pruneReadyQueue.PushBack(nextTx)
-					}
+				if ds.txReadyCount[nextTx] == 0 && !ds.inReady[nextTx] && !ds.inPruneReady[nextTx] {
+					ds.pruneReadyQueue.PushBack(nextTx)
+					ds.inPruneReady[nextTx] = true
 				}
 			}
 		}
@@ -283,24 +268,9 @@ func (ds *DepurgeScheduler) Prune(txID string, realKeys []string) {
 					nextTx := queue.front()
 					if nextTx != "" && !ds.txExecuted[nextTx] {
 						ds.txReadyCount[nextTx]--
-						if ds.txReadyCount[nextTx] == 0 {
-							isAlreadyInReady := false
-							for elem := ds.readyQueue.Front(); elem != nil; elem = elem.Next() {
-								if elem.Value.(string) == nextTx {
-									isAlreadyInReady = true
-									break
-								}
-							}
-							isAlreadyInPruneReady := false
-							for elem := ds.pruneReadyQueue.Front(); elem != nil; elem = elem.Next() {
-								if elem.Value.(string) == nextTx {
-									isAlreadyInPruneReady = true
-									break
-								}
-							}
-							if !isAlreadyInReady && !isAlreadyInPruneReady {
-								ds.pruneReadyQueue.PushBack(nextTx)
-							}
+						if ds.txReadyCount[nextTx] == 0 && !ds.inReady[nextTx] && !ds.inPruneReady[nextTx] {
+							ds.pruneReadyQueue.PushBack(nextTx)
+							ds.inPruneReady[nextTx] = true
 						}
 					}
 				}
@@ -341,6 +311,7 @@ func (ds *DepurgeScheduler) PopReady() string {
 		return ""
 	}
 	ds.readyQueue.Remove(elem)
+	delete(ds.inReady, elem.Value.(string))
 	return elem.Value.(string)
 }
 
@@ -348,6 +319,7 @@ func (ds *DepurgeScheduler) PushReady(txID string) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.readyQueue.PushBack(txID)
+	ds.inReady[txID] = true
 }
 
 func (ds *DepurgeScheduler) GetPruneReadyQueueLen() int {
@@ -364,6 +336,7 @@ func (ds *DepurgeScheduler) PopPruneReady() string {
 		return ""
 	}
 	ds.pruneReadyQueue.Remove(elem)
+	delete(ds.inPruneReady, elem.Value.(string))
 	return elem.Value.(string)
 }
 
@@ -381,6 +354,7 @@ func (ds *DepurgeScheduler) schedule() [][]string {
 			}
 			txID := elem.Value.(string)
 			ds.readyQueue.Remove(elem)
+			delete(ds.inReady, txID)
 
 			level = append(level, txID)
 			ds.Execute(txID)

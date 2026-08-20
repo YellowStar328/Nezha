@@ -7,13 +7,17 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"Nezha/core"
 	levm "Nezha/evm/levm"
+	vmi "Nezha/evm/levm/vminterface"
 
 	"Nezha/ethereum/go-ethereum/common"
 	ecore "Nezha/ethereum/go-ethereum/core"
+	"Nezha/ethereum/go-ethereum/core/rawdb"
 	"Nezha/ethereum/go-ethereum/core/state"
+	"Nezha/ethereum/go-ethereum/ethdb"
 )
 
 // LevmSpecFallback is an in-process SpecFallback implementation that uses the
@@ -41,6 +45,10 @@ type LevmSpecFallback struct {
 	// tmpDir is the temporary leveldb directory backing the levm. Removed on
 	// Close to avoid leaking state across test runs.
 	tmpDir string
+	// noCloseEdb is set for workers sharing a pool-owned backing store (real
+	// trie mode): their levm must NOT close the shared leveldb on Close — the
+	// pool closes it once.
+	noCloseEdb bool
 }
 
 // NewLevmSpecFallback creates a fallback executor backed by an in-process
@@ -84,9 +92,97 @@ func NewLevmSpecFallback(ds *DatasetReader, fromBlock, toBlock uint64) (*LevmSpe
 	}, nil
 }
 
-// SetTransactions is a no-op kept for API symmetry with the old direct
-// executor; transactions are already loaded in NewLevmSpecFallback.
-func (f *LevmSpecFallback) SetTransactions(txs []RawTransaction) { f.txs = txs }
+// NewLevmSpecFallbackDisk is like NewLevmSpecFallback but backs the levm with
+// a real on-disk leveldb (in a fresh temp dir) instead of an in-memory ethdb.
+// This makes the executor pay real trie-commit / disk-flush costs (see
+// CommitTrie) and gives a more faithful end-to-end time model for serial
+// baseline and serial replay paths. The temp dir is removed on Close.
+func NewLevmSpecFallbackDisk(ds *DatasetReader, fromBlock, toBlock uint64) (*LevmSpecFallback, error) {
+	txs, err := ds.LoadBlockRangeTxs(fromBlock, toBlock)
+	if err != nil {
+		return nil, fmt.Errorf("load block range txs [%d,%d]: %w", fromBlock, toBlock, err)
+	}
+	witness, err := ds.LoadBlockWitness(fromBlock)
+	if err != nil {
+		return nil, fmt.Errorf("load block witness %d: %w", fromBlock, err)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "levm-disk-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp leveldb dir: %w", err)
+	}
+	// Disk-backed levm: real leveldb at tmpDir.
+	lvm := levm.New(tmpDir, new(big.Int).SetUint64(fromBlock), common.Address{})
+
+	sdb := lvm.GetStateDB()
+	if sdb == nil {
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("levm stateDB is nil")
+	}
+	if err := injectWitnessIntoStateDB(sdb, witness); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("inject witness: %w", err)
+	}
+
+	return &LevmSpecFallback{
+		lvm:      lvm,
+		txs:      txs,
+		blockNum: fromBlock,
+		tmpDir:   tmpDir,
+	}, nil
+}
+
+// NewLevmSpecFallbackTrieDisk creates a fallback executor whose witness state
+// is encoded as a REAL Merkle Patricia Trie flushed to an on-disk leveldb
+// (see BuildWitnessTrie), then opened through a StateDB over a shared trie
+// database.
+//
+// State reads follow the vegeta-upstream access form: the EVM issues trie.Get,
+// nodes miss the trie cache on first touch, and the leveldb on disk serves them
+// — genuine cold reads with no simulated latency. Nodes loaded once stay in the
+// SHARED trie node cache (cacheMB MB; 0 disables it, keeping the old sharpest
+// cold-read semantics where every node load goes to the disk), exactly like a
+// full node. The temp dir is removed on Close.
+func NewLevmSpecFallbackTrieDisk(ds *DatasetReader, fromBlock, toBlock uint64, cacheMB int) (*LevmSpecFallback, error) {
+	txs, err := ds.LoadBlockRangeTxs(fromBlock, toBlock)
+	if err != nil {
+		return nil, fmt.Errorf("load block range txs [%d,%d]: %w", fromBlock, toBlock, err)
+	}
+	witness, err := ds.LoadBlockWitness(fromBlock)
+	if err != nil {
+		return nil, fmt.Errorf("load block witness %d: %w", fromBlock, err)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "levm-trie-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp leveldb dir: %w", err)
+	}
+	// cache=0: no leveldb block cache, so node reads hit the disk cold (the
+	// sharpest cold-read semantics; a full node would use a small cache).
+	edb, err := rawdb.NewLevelDBDatabase(tmpDir, 0, 1, "")
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("open leveldb: %w", err)
+	}
+
+	root, err := BuildWitnessTrie(witness.Accounts, edb)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("build witness trie: %w", err)
+	}
+
+	// Shared trie node cache: the first touch of each node is a real cold read
+	// from leveldb; every later touch is an in-memory hit (full-node semantics).
+	sdb := vmi.NewSharedTrieDatabase(edb, cacheMB)
+	lvm := levm.NewMemoryWithSharedTrie(root, sdb, edb, new(big.Int).SetUint64(fromBlock), common.Address{})
+
+	return &LevmSpecFallback{
+		lvm:      lvm,
+		txs:      txs,
+		blockNum: fromBlock,
+		tmpDir:   tmpDir,
+	}, nil
+}
 
 // injectWitnessIntoStateDB writes every witness account (balance, nonce,
 // code, storage) into the given stateDB. This makes the EVM behave as if the
@@ -653,7 +749,7 @@ func storageKeysToStrings(m map[common.Hash]common.Hash, contractAddr common.Add
 
 // Close releases the levm and removes the temporary backing database.
 func (f *LevmSpecFallback) Close() error {
-	if f.lvm != nil {
+	if f.lvm != nil && !f.noCloseEdb {
 		f.lvm.Close()
 	}
 	if f.tmpDir != "" {
@@ -661,6 +757,42 @@ func (f *LevmSpecFallback) Close() error {
 		f.tmpDir = ""
 	}
 	return nil
+}
+
+// CommitTrie simulates the end-of-block state commit a real node performs:
+// finalise all dirty state objects, compute the intermediate root, then flush
+// the dirty trie nodes to the backing database (real leveldb when created via
+// NewLevmSpecFallbackDisk, in-memory otherwise). Returns the elapsed time.
+//
+// Should be called once after the last accumulating execution (PreExecuteCommit
+// / ReExecuteCommit) when measuring realistic serial timings.
+func (f *LevmSpecFallback) CommitTrie() (time.Duration, error) {
+	if f.lvm == nil {
+		return 0, fmt.Errorf("LevmSpecFallback: lvm not initialized")
+	}
+	sdb := f.lvm.GetStateDB()
+	if sdb == nil {
+		return 0, fmt.Errorf("LevmSpecFallback: stateDB not initialized")
+	}
+	start := time.Now()
+	root := sdb.IntermediateRoot(false)
+	if _, err := sdb.Commit(false); err != nil {
+		return time.Since(start), fmt.Errorf("stateDB Commit: %w", err)
+	}
+	if err := sdb.Database().TrieDB().Commit(root, true); err != nil {
+		return time.Since(start), fmt.Errorf("trieDB Commit: %w", err)
+	}
+	return time.Since(start), nil
+}
+
+// SetAccessLatency forwards the simulated trie cold-read latency to the
+// underlying levm. Must be called after construction and before the first
+// PreExecute/ReExecute. nil disables.
+func (f *LevmSpecFallback) SetAccessLatency(sim *levm.AccessLatencySimulator) {
+	if f.lvm == nil {
+		return
+	}
+	f.lvm.SetAccessLatency(sim)
 }
 
 // ---------------------------------------------------------------------------
@@ -694,6 +826,11 @@ type LevmSpecFallbackPool struct {
 	idle     chan *LevmSpecFallback
 	blockNum uint64
 	n        int
+	// edb / tmpDir are the shared backing store in real-trie mode
+	// (NewLevmSpecFallbackPoolTrie). The pool owns it; workers must not close
+	// it individually.
+	edb    ethdb.Database
+	tmpDir string
 }
 
 // NewLevmSpecFallbackPool creates a pool of n independent LevmSpecFallback
@@ -729,6 +866,86 @@ func NewLevmSpecFallbackPool(ds *DatasetReader, fromBlock, toBlock uint64, n int
 	return pool, nil
 }
 
+// NewLevmSpecFallbackPoolTrie creates a pool of n workers whose witness state
+// is encoded ONCE as a REAL Merkle Patricia Trie flushed to a shared on-disk
+// leveldb (see BuildWitnessTrie). Every worker then opens its own StateDB from
+// the same root, sharing ONE trie.Database instance, so:
+//
+//   - state reads traverse the real MPT (vegeta-upstream access form);
+//   - a node miss hits the shared leveldb on disk (genuine cold I/O, no
+//     simulated latency) only on the FIRST touch of that node;
+//   - nodes loaded by any worker stay in the SHARED trie node cache
+//     (cacheMB MB; 0 disables it, restoring the old per-worker empty-cache
+//     semantics where every load goes to the disk), so each node is cold-read
+//     at most once per block — mirroring a full node's shared trie cache;
+//   - each worker still keeps its own stateObject caches, so the pool
+//     parallelizes across N independent StateDBs like the in-memory pool.
+//
+// leveldb handles concurrent readers safely; the backing store is closed once
+// by Pool.Close.
+func NewLevmSpecFallbackPoolTrie(ds *DatasetReader, fromBlock, toBlock uint64, n, cacheMB int) (*LevmSpecFallbackPool, error) {
+	if n <= 0 {
+		n = runtime.NumCPU()
+	}
+	txs, err := ds.LoadBlockRangeTxs(fromBlock, toBlock)
+	if err != nil {
+		return nil, fmt.Errorf("load block range txs [%d,%d]: %w", fromBlock, toBlock, err)
+	}
+	witness, err := ds.LoadBlockWitness(fromBlock)
+	if err != nil {
+		return nil, fmt.Errorf("load block witness %d: %w", fromBlock, err)
+	}
+	tmpDir, err := os.MkdirTemp("", "levm-pool-trie-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp leveldb dir: %w", err)
+	}
+	edb, err := rawdb.NewLevelDBDatabase(tmpDir, 0, 1, "")
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("open leveldb: %w", err)
+	}
+	root, err := BuildWitnessTrie(witness.Accounts, edb)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("build witness trie: %w", err)
+	}
+
+	pool := &LevmSpecFallbackPool{
+		workers:  make([]*LevmSpecFallback, n),
+		idle:     make(chan *LevmSpecFallback, n),
+		blockNum: fromBlock,
+		n:        n,
+		edb:      edb,
+		tmpDir:   tmpDir,
+	}
+	// One shared trie.Database: the first touch of each node is a real cold
+	// read from the shared leveldb; every later touch (by any worker) is an
+	// in-memory hit on the shared node cache.
+	sdb := vmi.NewSharedTrieDatabase(edb, cacheMB)
+	block := new(big.Int).SetUint64(fromBlock)
+	for i := 0; i < n; i++ {
+		lvm := levm.NewMemoryWithSharedTrie(root, sdb, edb, block, common.Address{})
+		fb := &LevmSpecFallback{
+			lvm:        lvm,
+			txs:        txs,
+			blockNum:   fromBlock,
+			noCloseEdb: true,
+		}
+		pool.workers[i] = fb
+		pool.idle <- fb
+	}
+	return pool, nil
+}
+
+// SetAccessLatency forwards the simulated trie cold-read latency to every
+// worker levm. Must be called after construction and before the first
+// PreExecute/ReExecute. nil disables.
+func (p *LevmSpecFallbackPool) SetAccessLatency(sim *levm.AccessLatencySimulator) {
+	for _, w := range p.workers {
+		w.SetAccessLatency(sim)
+	}
+}
+
 // Acquire returns an idle LevmSpecFallback worker, blocking until one is
 // available. Use Release() to return it. Safe for concurrent use.
 //
@@ -758,13 +975,24 @@ func (p *LevmSpecFallbackPool) Release(w *LevmSpecFallback) {
 	p.idle <- w
 }
 
-// Close releases every worker's levm + temp leveldb.
+// Close releases every worker's levm + temp leveldb (and the shared backing
+// store + temp dir in real-trie mode).
 func (p *LevmSpecFallbackPool) Close() error {
 	var firstErr error
 	for _, w := range p.workers {
 		if err := w.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if p.edb != nil {
+		if err := p.edb.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		p.edb = nil
+	}
+	if p.tmpDir != "" {
+		_ = os.RemoveAll(p.tmpDir)
+		p.tmpDir = ""
 	}
 	return firstErr
 }
@@ -921,6 +1149,10 @@ func (p *LevmSpecFallbackPool) ReExecuteBatch(txIndices []int, stateOverrides []
 	}
 	return out, errs
 }
+
+// SetTransactions is a no-op kept for API symmetry with the old direct
+// executor; transactions are already loaded in NewLevmSpecFallback.
+func (f *LevmSpecFallback) SetTransactions(txs []RawTransaction) { f.txs = txs }
 
 // SetTransactions forwards to every worker (kept for API symmetry).
 func (p *LevmSpecFallbackPool) SetTransactions(txs []RawTransaction) {

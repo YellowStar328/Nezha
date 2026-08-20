@@ -28,6 +28,9 @@ type LEVM struct {
 	evm          *vm.EVM
 	edb          ethdb.Database
 	structLogger *vm.StructLogger
+	// latSim optionally simulates trie cold-read latency on every state read
+	// performed through the EVM. nil disables it.
+	latSim *AccessLatencySimulator
 }
 
 // New creates a new instace of the LEVM
@@ -55,6 +58,38 @@ func NewMemory(blockNumber *big.Int, origin common.Address) *LEVM {
 	return &lvm
 }
 
+// NewMemoryWithTrie creates a LEVM whose stateDB is opened from an existing
+// account-trie root over a caller-supplied backing store (typically leveldb
+// with the witness encoded as a real trie — see utils.BuildWitnessTrie).
+//
+// The trie caches start empty, so every state read traverses the real MPT and
+// loads nodes from the backing store on first touch (genuine cold reads, no
+// simulated latency) — the vegeta-upstream access form.
+func NewMemoryWithTrie(root common.Hash, edb ethdb.Database, blockNumber *big.Int, origin common.Address) *LEVM {
+	lvm := LEVM{}
+	lvm.stateDB, lvm.edb = vmi.NewStateDBWithTrie(root, edb)
+	lvm.NewEVM(blockNumber, origin)
+	return &lvm
+}
+
+// NewMemoryWithSharedTrie creates a LEVM whose stateDB is opened from an
+// existing account-trie root over a caller-supplied SHARED trie database (see
+// vmi.NewSharedTrieDatabase). All StateDBs sharing the same database instance
+// see the same trie node cache, so a node loaded by any worker is warm for all
+// the others — exactly like a full node's shared trie cache: each node is
+// cold-read at most once per block, later accesses are in-memory hits.
+//
+// The caller owns the backing store and must ensure it outlives the EVM;
+// lvm.edb is set to the backing store so Close() still closes it (pool workers
+// use noCloseEdb to leave that to the pool).
+func NewMemoryWithSharedTrie(root common.Hash, db state.Database, edb ethdb.Database, blockNumber *big.Int, origin common.Address) *LEVM {
+	lvm := LEVM{}
+	lvm.stateDB = vmi.NewStateDBWithSharedTrie(root, db)
+	lvm.edb = edb
+	lvm.NewEVM(blockNumber, origin)
+	return &lvm
+}
+
 // NewEVM creates a fresh evm instance with
 // new origin and blocknumber and time.
 // This method recreates the contained EVM while
@@ -72,8 +107,19 @@ func (lvm *LEVM) NewEVM(blockNumber *big.Int, origin common.Address) {
 
 	// Use a chain config with all major forks enabled from block 0 so
 	// contracts compiled by modern solc versions can execute in this LEVM.
-	lvm.evm = vm.NewEVM(vmContext, lvm.stateDB, params.AllEthashProtocolChanges, vmConfig)
+	lvm.evm = vm.NewEVM(vmContext, lvm.newEVMTargetStateDB(), params.AllEthashProtocolChanges, vmConfig)
 	lvm.structLogger = structLogger
+}
+
+// newEVMTargetStateDB returns the stateDB that the EVM should execute against.
+// When a latency simulator is configured, it wraps the real stateDB so that
+// every interpreter-level state read charges the simulated cold-read latency;
+// otherwise the raw stateDB is used.
+func (lvm *LEVM) newEVMTargetStateDB() vm.StateDB {
+	if lvm.latSim != nil {
+		return &latencyStateDB{StateDB: lvm.stateDB, sim: lvm.latSim}
+	}
+	return lvm.stateDB
 }
 
 // NewEVMNoTrace creates a fresh EVM instance with a RW-set-only logger.
@@ -91,8 +137,20 @@ func (lvm *LEVM) NewEVMNoTrace(blockNumber *big.Int, origin common.Address) {
 	vmContext := vmi.NewVMContext(origin, origin, blockNumber, chainContext)
 	structLogger := vm.NewRWSetLogger()
 	vmConfig := vm.Config{Debug: true, Tracer: structLogger}
-	lvm.evm = vm.NewEVM(vmContext, lvm.stateDB, params.AllEthashProtocolChanges, vmConfig)
+	lvm.evm = vm.NewEVM(vmContext, lvm.newEVMTargetStateDB(), params.AllEthashProtocolChanges, vmConfig)
 	lvm.structLogger = structLogger
+}
+
+// SetAccessLatency enables the simulated trie cold-read latency for this
+// LEVM. The EVM is rebuilt so that every interpreter-level state read goes
+// through the latency wrapper. Passing nil is a no-op (the EVM keeps running
+// without the wrapper). Must be called before executing any transaction.
+func (lvm *LEVM) SetAccessLatency(sim *AccessLatencySimulator) {
+	if sim == nil {
+		return
+	}
+	lvm.latSim = sim
+	lvm.NewEVMNoTrace(lvm.evm.BlockNumber, lvm.evm.Origin)
 }
 
 // DeployContract will create and deploy a new

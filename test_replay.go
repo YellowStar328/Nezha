@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"Nezha/core"
+	"Nezha/evm/levm"
 	"Nezha/utils"
 
 	"github.com/panjf2000/ants"
@@ -545,6 +546,10 @@ func runReplayDepurgeMode(
 	writer *bufio.Writer,
 	datasetDir string,
 	fromBlock, toBlock uint64,
+	stateLatency time.Duration,
+	diskCommit bool,
+	trieDisk bool,
+	trieCacheMB int,
 ) error {
 	// --- Step 1: open dataset + load block range ---
 	ds, err := utils.NewDatasetReader(datasetDir)
@@ -583,9 +588,25 @@ func runReplayDepurgeMode(
 	// contention. This mirrors the LLMCaptureRWSet pattern (one levm per tx
 	// fallback) but reuses workers across txs to amortize levm.New + witness
 	// injection cost (~100ms each).
-	levmPool, err := utils.NewLevmSpecFallbackPool(ds, fromBlock, toBlock, 0) // 0 → runtime.NumCPU()
-	if err != nil {
-		return fmt.Errorf("NewLevmSpecFallbackPool: %w", err)
+	//
+	// With --disk-trie the witness is encoded once as a REAL Merkle Patricia
+	// Trie on a shared on-disk leveldb; every worker reads through its own
+	// fresh (empty-cache) StateDB, so node loads miss the trie cache and hit
+	// the disk (genuine cold reads, no simulation).
+	var levmPool *utils.LevmSpecFallbackPool
+	if trieDisk {
+		levmPool, err = utils.NewLevmSpecFallbackPoolTrie(ds, fromBlock, toBlock, 0, trieCacheMB)
+		if err != nil {
+			return fmt.Errorf("NewLevmSpecFallbackPoolTrie: %w", err)
+		}
+	} else {
+		levmPool, err = utils.NewLevmSpecFallbackPool(ds, fromBlock, toBlock, 0) // 0 → runtime.NumCPU()
+		if err != nil {
+			return fmt.Errorf("NewLevmSpecFallbackPool: %w", err)
+		}
+		// Simulate trie cold-read latency for the parallel pool (own simulator,
+		// so the serial baseline below starts from a cold cache as well).
+		levmPool.SetAccessLatency(levm.NewAccessLatencySimulator(stateLatency))
 	}
 	defer levmPool.Close()
 	writer.Flush()
@@ -935,29 +956,37 @@ func runReplayDepurgeMode(
 			break
 		}
 
-		for scheduler.GetReadyQueueLen() > 0 {
+		worked := false
+		for {
 			txID := scheduler.PopReady()
 			if txID == "" {
 				break
 			}
 			atomic.AddInt32(&inProgress, 1)
 			_ = validatePool.Invoke(txID)
+			worked = true
 		}
 
-		for scheduler.GetPruneReadyQueueLen() > 0 {
+		for {
 			txID := scheduler.PopPruneReady()
 			if txID == "" {
 				break
 			}
 			atomic.AddInt32(&inProgress, 1)
 			_ = validatePool.Invoke(txID)
+			worked = true
+		}
+
+		// Idle spin: yield the P so workers can finish and push more work,
+		// instead of hammering the scheduler RLock in a tight loop.
+		if !worked {
+			runtime.Gosched()
 		}
 	}
 	execDur := time.Since(startExec)
 	writer.WriteString(fmt.Sprintf("Time of execution: %v\n", execDur))
 
 	// --- Step 9: serial replay of aborted txs (sorted by TxID) ---
-	startSerial := time.Now()
 	sort.Strings(serialReplayList)
 	serialReplayed := 0
 
@@ -976,11 +1005,42 @@ func runReplayDepurgeMode(
 	// skip NewLevmSpecFallback + injectWitnessIntoStateDB (~10-20ms saved).
 	// Safe because the validation loop is done; no other goroutine uses
 	// the pool concurrently at this point.
-	serialReplayer, err := levmPool.Acquire()
-	if err != nil {
-		return fmt.Errorf("levmPool.Acquire (serial replay): %w", err)
+	//
+	// With --disk-commit, serial replay runs on a dedicated on-disk leveldb
+	// levm so its end-of-block trie commit pays real disk-flush cost. With
+	// --disk-trie the witness is a REAL trie on disk, so serial replay also
+	// reads through the real trie path (no simulation).
+	//
+	// The replayer is constructed LAZILY and BEFORE the timer: with --disk-trie
+	// the replayer re-encodes the witness into its own leveldb
+	// (BuildWitnessTrie) — a one-time benchmark-preparation cost that the
+	// serial baseline likewise excludes from its timer (its construction
+	// happens before startSerialBaseline). With zero aborts we skip
+	// construction entirely.
+	var serialReplayer *utils.LevmSpecFallback
+	if len(serialReplayList) > 0 {
+		switch {
+		case trieDisk:
+			serialReplayer, err = utils.NewLevmSpecFallbackTrieDisk(ds, fromBlock, toBlock, trieCacheMB)
+			if err != nil {
+				return fmt.Errorf("NewLevmSpecFallbackTrieDisk (serial replay): %w", err)
+			}
+			defer serialReplayer.Close()
+		case diskCommit:
+			serialReplayer, err = utils.NewLevmSpecFallbackDisk(ds, fromBlock, toBlock)
+			if err != nil {
+				return fmt.Errorf("NewLevmSpecFallbackDisk (serial replay): %w", err)
+			}
+			defer serialReplayer.Close()
+		default:
+			serialReplayer, err = levmPool.Acquire()
+			if err != nil {
+				return fmt.Errorf("levmPool.Acquire (serial replay): %w", err)
+			}
+			defer levmPool.Release(serialReplayer)
+		}
 	}
-	defer levmPool.Release(serialReplayer)
+	startSerial := time.Now()
 
 	// First tx: apply committedDelta overlay via ReExecuteCommit (with delta
 	// computation + writeback). Subsequent txs use PreExecuteCommit (no delta,
@@ -1025,6 +1085,17 @@ func runReplayDepurgeMode(
 		serialReplayed++
 	}
 	serialDur := time.Since(startSerial)
+	// With --disk-commit, pay the real end-of-block trie flush so serial
+	// replay reflects the same commit cost as the serial baseline.
+	if diskCommit {
+		commitDur, cerr := serialReplayer.CommitTrie()
+		if cerr != nil {
+			fmt.Printf("  WARN: serial replay trie commit failed: %v\n", cerr)
+		} else {
+			serialDur += commitDur
+			writer.WriteString(fmt.Sprintf("  trie commit (serial replay): %v\n", commitDur))
+		}
+	}
 	writer.WriteString(fmt.Sprintf("Time of serial replay: %v\n", serialDur))
 	writer.WriteString(fmt.Sprintf("Serial replayed: %d\n", serialReplayed))
 
@@ -1054,11 +1125,27 @@ func runReplayDepurgeMode(
 	// state. We re-inject witness from the dataset.
 	depurgeDur := time.Since(startPreAnalysis)
 
-	serialBaseline, err := utils.NewLevmSpecFallback(ds, fromBlock, toBlock)
+	// Serial baseline: with --disk-commit use a real on-disk leveldb so the
+	// end-of-block trie commit pays actual disk-flush cost; with --disk-trie
+	// the witness is a REAL trie on disk so the baseline reads through the
+	// real trie path; otherwise the in-memory levm (fast, no disk I/O).
+	var serialBaseline *utils.LevmSpecFallback
+	switch {
+	case trieDisk:
+		serialBaseline, err = utils.NewLevmSpecFallbackTrieDisk(ds, fromBlock, toBlock, trieCacheMB)
+	case diskCommit:
+		serialBaseline, err = utils.NewLevmSpecFallbackDisk(ds, fromBlock, toBlock)
+	default:
+		serialBaseline, err = utils.NewLevmSpecFallback(ds, fromBlock, toBlock)
+	}
 	startSerialBaseline := time.Now()
 	if err != nil {
 		return fmt.Errorf("NewLevmSpecFallback (serial baseline): %w", err)
 	}
+	// Serial baseline pays the same cold-read simulation from its OWN cold
+	// cache (independent simulator), so both sides face identical state-access
+	// costs and only the latency-overlap differs.
+	serialBaseline.SetAccessLatency(levm.NewAccessLatencySimulator(stateLatency))
 	defer serialBaseline.Close()
 
 	serialOK, serialFail := 0, 0
@@ -1090,6 +1177,18 @@ func runReplayDepurgeMode(
 		serialOK++
 	}
 	serialBaselineDur := time.Since(startSerialBaseline)
+	// With --disk-commit, pay the real end-of-block trie flush so the serial
+	// baseline reflects a real node's commit cost (IntermediateRoot + Commit +
+	// leveldb flush), not just in-memory state accumulation.
+	if diskCommit {
+		commitDur, cerr := serialBaseline.CommitTrie()
+		if cerr != nil {
+			fmt.Printf("  WARN: serial baseline trie commit failed: %v\n", cerr)
+		} else {
+			serialBaselineDur += commitDur
+			writer.WriteString(fmt.Sprintf("  trie commit (serial baseline): %v\n", commitDur))
+		}
+	}
 
 	writer.WriteString(fmt.Sprintf("===================================================\n"))
 	writer.WriteString(fmt.Sprintf("Baseline: serial execution of all %d txs (commit between txs)\n", txCount))
@@ -1171,6 +1270,10 @@ func runReplayVegetaMode(
 	writer *bufio.Writer,
 	datasetDir string,
 	fromBlock, toBlock uint64,
+	stateLatency time.Duration,
+	diskCommit bool,
+	trieDisk bool,
+	trieCacheMB int,
 ) error {
 	// --- Step 1: open dataset + load block range ---
 	ds, err := utils.NewDatasetReader(datasetDir)
@@ -1194,9 +1297,24 @@ func runReplayVegetaMode(
 	writer.Flush()
 
 	// --- Step 2: LevmSpecFallbackPool (NumCPU workers) ---
-	levmPool, err := utils.NewLevmSpecFallbackPool(ds, fromBlock, toBlock, 0)
-	if err != nil {
-		return fmt.Errorf("NewLevmSpecFallbackPool: %w", err)
+	// With --disk-trie the witness is encoded once as a REAL Merkle Patricia
+	// Trie on a shared on-disk leveldb; every worker reads through its own
+	// fresh (empty-cache) StateDB, so node loads miss the trie cache and hit
+	// the disk (genuine cold reads, no simulation).
+	var levmPool *utils.LevmSpecFallbackPool
+	if trieDisk {
+		levmPool, err = utils.NewLevmSpecFallbackPoolTrie(ds, fromBlock, toBlock, 0, trieCacheMB)
+		if err != nil {
+			return fmt.Errorf("NewLevmSpecFallbackPoolTrie: %w", err)
+		}
+	} else {
+		levmPool, err = utils.NewLevmSpecFallbackPool(ds, fromBlock, toBlock, 0)
+		if err != nil {
+			return fmt.Errorf("NewLevmSpecFallbackPool: %w", err)
+		}
+		// Simulate trie cold-read latency for the parallel pool (own simulator,
+		// so the serial baseline below starts from a cold cache as well).
+		levmPool.SetAccessLatency(levm.NewAccessLatencySimulator(stateLatency))
 	}
 	defer levmPool.Close()
 	writer.Flush()
@@ -1567,15 +1685,42 @@ func runReplayVegetaMode(
 	// ACCUMULATING between txs (ReExecuteCommit → PreExecuteCommit).
 	//
 	// Uses a dedicated levm from the pool (the validation loop is done).
-	startSerial := time.Now()
 	sort.Strings(serialReplayList)
 	serialReplayed := 0
 
-	serialReplayer, err := levmPool.Acquire()
-	if err != nil {
-		return fmt.Errorf("levmPool.Acquire (serial replay): %w", err)
+	// With --disk-commit, serial replay runs on a dedicated on-disk leveldb
+	// levm so its end-of-block trie commit pays real disk-flush cost. With
+	// --disk-trie the witness is a REAL trie on disk, so serial replay also
+	// reads through the real trie path (no simulation).
+	//
+	// Constructed LAZILY and BEFORE the timer (same rationale as Depurge
+	// Step 9): the --disk-trie replayer re-encodes the witness into its own
+	// leveldb — a one-time preparation cost that the serial baseline likewise
+	// excludes from its timer. With zero aborts we skip construction.
+	var serialReplayer *utils.LevmSpecFallback
+	if len(serialReplayList) > 0 {
+		switch {
+		case trieDisk:
+			serialReplayer, err = utils.NewLevmSpecFallbackTrieDisk(ds, fromBlock, toBlock, trieCacheMB)
+			if err != nil {
+				return fmt.Errorf("NewLevmSpecFallbackTrieDisk (serial replay): %w", err)
+			}
+			defer serialReplayer.Close()
+		case diskCommit:
+			serialReplayer, err = utils.NewLevmSpecFallbackDisk(ds, fromBlock, toBlock)
+			if err != nil {
+				return fmt.Errorf("NewLevmSpecFallbackDisk (serial replay): %w", err)
+			}
+			defer serialReplayer.Close()
+		default:
+			serialReplayer, err = levmPool.Acquire()
+			if err != nil {
+				return fmt.Errorf("levmPool.Acquire (serial replay): %w", err)
+			}
+			defer levmPool.Release(serialReplayer)
+		}
 	}
-	defer levmPool.Release(serialReplayer)
+	startSerial := time.Now()
 
 	// First tx: apply committedDelta overlay via ReExecuteCommit.
 	// Subsequent txs: PreExecuteCommit (stateDB already carries accumulated writes).
@@ -1614,6 +1759,17 @@ func runReplayVegetaMode(
 		serialReplayed++
 	}
 	serialDur := time.Since(startSerial)
+	// With --disk-commit, pay the real end-of-block trie flush so serial
+	// replay reflects the same commit cost as the serial baseline.
+	if diskCommit {
+		commitDur, cerr := serialReplayer.CommitTrie()
+		if cerr != nil {
+			fmt.Printf("  WARN: serial replay trie commit failed: %v\n", cerr)
+		} else {
+			serialDur += commitDur
+			writer.WriteString(fmt.Sprintf("  trie commit (serial replay): %v\n", commitDur))
+		}
+	}
 	writer.WriteString(fmt.Sprintf("Time of serial replay: %v\n", serialDur))
 	writer.WriteString(fmt.Sprintf("Serial replayed: %d\n", serialReplayed))
 
@@ -1624,10 +1780,26 @@ func runReplayVegetaMode(
 	// every tx, measures Vegeta's speedup vs pure serial.
 	vegetaDur := preAnalysisDur + execDur + serialDur + dagDur
 
-	serialBaseline, err := utils.NewLevmSpecFallback(ds, fromBlock, toBlock)
+	// Serial baseline: with --disk-commit use a real on-disk leveldb so the
+	// end-of-block trie commit pays actual disk-flush cost; with --disk-trie
+	// the witness is a REAL trie on disk so the baseline reads through the
+	// real trie path; otherwise the in-memory levm (fast, no disk I/O).
+	var serialBaseline *utils.LevmSpecFallback
+	switch {
+	case trieDisk:
+		serialBaseline, err = utils.NewLevmSpecFallbackTrieDisk(ds, fromBlock, toBlock, trieCacheMB)
+	case diskCommit:
+		serialBaseline, err = utils.NewLevmSpecFallbackDisk(ds, fromBlock, toBlock)
+	default:
+		serialBaseline, err = utils.NewLevmSpecFallback(ds, fromBlock, toBlock)
+	}
 	if err != nil {
 		return fmt.Errorf("NewLevmSpecFallback (serial baseline): %w", err)
 	}
+	// Serial baseline pays the same cold-read simulation from its OWN cold
+	// cache (independent simulator), so both sides face identical state-access
+	// costs and only the latency-overlap differs.
+	serialBaseline.SetAccessLatency(levm.NewAccessLatencySimulator(stateLatency))
 	defer serialBaseline.Close()
 
 	startBaseline := time.Now()
@@ -1641,6 +1813,18 @@ func runReplayVegetaMode(
 		serialOK++
 	}
 	serialBaselineDur := time.Since(startBaseline)
+	// With --disk-commit, pay the real end-of-block trie flush so the serial
+	// baseline reflects a real node's commit cost (IntermediateRoot + Commit +
+	// leveldb flush), not just in-memory state accumulation.
+	if diskCommit {
+		commitDur, cerr := serialBaseline.CommitTrie()
+		if cerr != nil {
+			fmt.Printf("  WARN: serial baseline trie commit failed: %v\n", cerr)
+		} else {
+			serialBaselineDur += commitDur
+			writer.WriteString(fmt.Sprintf("  trie commit (serial baseline): %v\n", commitDur))
+		}
+	}
 
 	writer.WriteString(fmt.Sprintf("===================================================\n"))
 	writer.WriteString(fmt.Sprintf("Baseline: serial execution of all %d txs (commit between txs)\n", txCount))

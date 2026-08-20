@@ -43,3 +43,38 @@ func NewMemoryStateDB() (*state.StateDB, ethdb.Database) {
 	com.PanicErr(err)
 	return stateDB, edb
 }
+
+// NewStateDBWithTrie creates a StateDB over an EXISTING backing store whose
+// account trie is rooted at `root` (typically built by utils.BuildWitnessTrie).
+//
+// The trie cache is brand-new (empty): the first access to every node goes to
+// the backing store (real disk I/O for leveldb, memory lookup for memorydb).
+// This is the vegeta-upstream access form — state reads traverse a real MPT
+// and load nodes on demand — with no simulated latency.
+func NewStateDBWithTrie(root common.Hash, edb ethdb.Database) (*state.StateDB, ethdb.Database) {
+	db := state.NewDatabase(edb)
+	stateDB, err := state.New(root, db)
+	com.PanicErr(err)
+	return stateDB, edb
+}
+
+// NewSharedTrieDatabase creates a state.Database that is safe for concurrent
+// use (see state.NewDatabaseWithCache) and keeps recently loaded trie nodes in
+// memory. cacheMB is the shared node-cache size in MB; 0 disables the node
+// cache, making every node load go to the backing store (the old cold-cache
+// semantics). Sharing ONE instance across all pool workers mirrors a full
+// node's shared trie cache: a node loaded by any worker is warm for every other
+// worker, so a given slot is cold-read at most once per block.
+func NewSharedTrieDatabase(edb ethdb.Database, cacheMB int) state.Database {
+	return state.NewDatabaseWithCache(edb, cacheMB)
+}
+
+// NewStateDBWithSharedTrie creates a StateDB over a caller-supplied (possibly
+// shared) state.Database. The trie node cache is the shared database's, so a
+// node loaded by one StateDB is warm for all other StateDBs that share the same
+// database instance. The caller owns the backing store.
+func NewStateDBWithSharedTrie(root common.Hash, db state.Database) *state.StateDB {
+	stateDB, err := state.New(root, db)
+	com.PanicErr(err)
+	return stateDB
+}

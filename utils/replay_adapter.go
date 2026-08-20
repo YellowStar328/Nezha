@@ -8,9 +8,9 @@ import (
 // EVM fallback when LLM analysis is unavailable (contract creation, plain
 // transfer, or unanalyzed function selector).
 //
-// *HTTPReplayExecutor (HTTP mode) and *LevmSpecFallback (in-process, no HTTP)
-// both implement it. Defined here so utils doesn't need to import levm or the
-// HTTP client — concrete implementations live alongside their dependencies.
+// *LevmSpecFallback (in-process, no HTTP) is the only implementation.
+// Defined here so utils doesn't need to import levm — the concrete
+// implementation lives alongside its dependencies.
 type SpecFallback interface {
 	PreExecute(blockNum uint64, txIdx int) (*core.ReplayRWSet, error)
 }

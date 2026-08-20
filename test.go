@@ -104,14 +104,12 @@ func main() {
 	flag.BoolVar(&Vegeta, "Vegeta", false, "specify Vegeta mode to use. defaults to false.")
 	flag.BoolVar(&benchmark, "benchmark", false, "specify benchmark mode to use. defaults to false.")
 
-	// Replay mode flags (mainnet block replay via eth-replayd).
-	var replaydURL string
+	// Replay mode flags (mainnet block replay via pure-levm path).
 	var datasetDir string
 	var blockNumStr string
 	var replayDepurge bool
 	var replayVegeta bool
 	var txsPerBlock int
-	flag.StringVar(&replaydURL, "replayd", "", "eth-replayd HTTP endpoint (enables replay mode)")
 	flag.StringVar(&datasetDir, "dataset", "", "Path to mainnet dataset directory (replay mode)")
 	flag.StringVar(&blockNumStr, "block-num", "24000000", "Block number or range a-b to replay (replay mode)")
 	flag.BoolVar(&replayDepurge, "replay-depurge", false, "Run pure-levm Depurge on mainnet block (no HTTP, uses LLM static analysis + LevmSpecFallback)")
@@ -169,26 +167,6 @@ func main() {
 			if err := runReplayVegetaMode(w, datasetDir, fromBlock, toBlock, stateLatency, diskCommit, trieDisk, trieCacheMB, txsPerBlock); err != nil {
 				log.Fatalf("replay vegeta mode: %v", err)
 			}
-		}
-		return
-	}
-
-	// Replay mode: skip synthetic test setup, go straight to mainnet replay.
-	if replaydURL != "" {
-		file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0666)
-		if err != nil {
-			log.Fatalf("open output file: %v", err)
-		}
-		defer file.Close()
-		w := bufio.NewWriter(file)
-		defer w.Flush()
-
-		w.WriteString(fmt.Sprintf("Replay started at: %s\n", time.Now().Format(time.RFC3339)))
-		w.WriteString(fmt.Sprintf("===================================================\n"))
-		w.Flush()
-
-		if err := runReplayMode(w, datasetDir, replaydURL, fromBlock, serial, CG, Depurge); err != nil {
-			log.Fatalf("replay mode: %v", err)
 		}
 		return
 	}

@@ -43,13 +43,12 @@ type LLMSpecStats struct {
 // instead of EVM pre-execution. Falls back to EVM PreExecute for unanalyzed txs.
 type LLMSpecExecutor struct {
 	mgr     *MainnetContractManager
-	evmExec SpecFallback // for fallback (HTTP or in-process levm)
+	evmExec SpecFallback // for fallback (in-process levm)
 }
 
 // NewLLMSpecExecutor creates a new LLMSpecExecutor that uses the given contract
 // manager for LLM-analyzed RW sets and the given EVM executor for fallback.
-// evmExec may be *HTTPReplayExecutor (HTTP mode) or *LevmSpecFallback
-// (in-process, no HTTP).
+// evmExec is *LevmSpecFallback (in-process, no HTTP).
 func NewLLMSpecExecutor(mgr *MainnetContractManager, evmExec SpecFallback) *LLMSpecExecutor {
 	return &LLMSpecExecutor{
 		mgr:     mgr,
@@ -160,8 +159,8 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAll(ds *DatasetReader, blockNum uint64) 
 
 // BatchPreExecutor is an optional interface that SpecFallback implementations
 // can implement to run PreExecute concurrently for a batch of tx indices.
-// *LevmSpecFallbackPool implements it; *HTTPReplayExecutor and single
-// *LevmSpecFallback do not (they fall back to serial PreExecute).
+// *LevmSpecFallbackPool implements it; single *LevmSpecFallback does not
+// (it falls back to serial PreExecute).
 type BatchPreExecutor interface {
 	PreExecuteBatch(txIndices []int) ([]*core.ReplayRWSet, []error)
 }
@@ -177,8 +176,8 @@ type BatchPreExecutor interface {
 //     of LLM + EVM (measured: ~27ms → ~18ms on block 24000000).
 //
 // In pool mode (LevmSpecFallbackPool) the EVM work is streamed via missCh and
-// runs CONCURRENTLY with Phase 1. In non-pool mode (HTTPReplayExecutor or
-// single LevmSpecFallback) misses are collected and run after Phase 1.
+// runs CONCURRENTLY with Phase 1. In non-pool mode (single LevmSpecFallback)
+// misses are collected and run after Phase 1.
 func (e *LLMSpecExecutor) LLMSpecExecuteAllWithStats(ds *DatasetReader, fromBlock, toBlock uint64) ([]*core.ReplayRWSet, LLMSpecStats, error) {
 	txs, err := ds.LoadBlockRangeTxs(fromBlock, toBlock)
 	if err != nil {
@@ -364,8 +363,8 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAllWithStats(ds *DatasetReader, fromBloc
 		return out, stats, nil
 	}
 
-	// --- Non-pool fallback paths (HTTPReplayExecutor or single
-	// LevmSpecFallback): run PreExecute after the LLM phase ---
+	// --- Non-pool fallback path (single LevmSpecFallback): run PreExecute
+	// after the LLM phase ---
 	batcher, hasBatch := e.evmExec.(BatchPreExecutor)
 	if hasBatch {
 		results, errs := batcher.PreExecuteBatch(misses)
@@ -385,7 +384,7 @@ func (e *LLMSpecExecutor) LLMSpecExecuteAllWithStats(ds *DatasetReader, fromBloc
 			out[txIdx] = rw
 		}
 	} else {
-		// Serial fallback path (HTTPReplayExecutor or single LevmSpecFallback).
+		// Serial fallback path (single LevmSpecFallback).
 		for _, txIdx := range misses {
 			rw, ferr := e.evmExec.PreExecute(fromBlock, txIdx)
 			if ferr != nil {

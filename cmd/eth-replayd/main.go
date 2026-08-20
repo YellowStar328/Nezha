@@ -17,28 +17,17 @@ func main() {
 		datasetDir string
 		fromBlock  uint64
 		toBlock    uint64
-		serve      bool
-		listenAddr string
 		conc       int
 	)
 
 	flag.StringVar(&datasetDir, "dataset", "", "Path to exported dataset directory")
 	flag.Uint64Var(&fromBlock, "from", 0, "Start block number (default: from manifest)")
 	flag.Uint64Var(&toBlock, "to", 0, "End block number (default: from manifest)")
-	flag.BoolVar(&serve, "serve", false, "Start HTTP server mode for Nezha scheduler integration")
-	flag.StringVar(&listenAddr, "listen", "127.0.0.1:8089", "HTTP listen address (--serve mode)")
 	flag.IntVar(&conc, "concurrency", 0, "PreExecute concurrency (default: NumCPU)")
 	flag.Parse()
 
 	if datasetDir == "" {
 		log.Fatal("Dataset directory required: use --dataset flag")
-	}
-
-	if serve {
-		if err := StartHTTPServer(listenAddr, datasetDir, conc); err != nil {
-			log.Fatalf("HTTP server failed: %v", err)
-		}
-		return
 	}
 
 	runCLIMode(datasetDir, fromBlock, toBlock)

@@ -831,6 +831,13 @@ type LevmSpecFallbackPool struct {
 	// it individually.
 	edb    ethdb.Database
 	tmpDir string
+	// root / sdb are the shared witness-trie root and trie node cache in
+	// real-trie mode. NewSerialWorker reuses them so serial replay skips
+	// BuildWitnessTrie entirely and starts from the ALREADY-WARM shared node
+	// cache (the validation phase cold-read every node it touches), instead of
+	// re-encoding the witness into a fresh leveldb and re-reading it cold.
+	root common.Hash
+	sdb  state.Database
 }
 
 // NewLevmSpecFallbackPool creates a pool of n independent LevmSpecFallback
@@ -910,6 +917,12 @@ func NewLevmSpecFallbackPoolTrie(ds *DatasetReader, fromBlock, toBlock uint64, n
 		return nil, fmt.Errorf("build witness trie: %w", err)
 	}
 
+	// One shared trie.Database: the first touch of each node is a real cold
+	// read from the shared leveldb; every later touch (by any worker) is an
+	// in-memory hit on the shared node cache. Kept on the pool so serial
+	// replay (NewSerialWorker) reuses the same cache instead of re-reading
+	// the trie cold.
+	sdb := vmi.NewSharedTrieDatabase(edb, cacheMB)
 	pool := &LevmSpecFallbackPool{
 		workers:  make([]*LevmSpecFallback, n),
 		idle:     make(chan *LevmSpecFallback, n),
@@ -917,11 +930,9 @@ func NewLevmSpecFallbackPoolTrie(ds *DatasetReader, fromBlock, toBlock uint64, n
 		n:        n,
 		edb:      edb,
 		tmpDir:   tmpDir,
+		root:     root,
+		sdb:      sdb,
 	}
-	// One shared trie.Database: the first touch of each node is a real cold
-	// read from the shared leveldb; every later touch (by any worker) is an
-	// in-memory hit on the shared node cache.
-	sdb := vmi.NewSharedTrieDatabase(edb, cacheMB)
 	block := new(big.Int).SetUint64(fromBlock)
 	for i := 0; i < n; i++ {
 		lvm := levm.NewMemoryWithSharedTrie(root, sdb, edb, block, common.Address{})
@@ -973,6 +984,38 @@ func (p *LevmSpecFallbackPool) Release(w *LevmSpecFallback) {
 		return
 	}
 	p.idle <- w
+}
+
+// NewSerialWorker creates a fresh levm over the pool's SHARED witness trie
+// (root + shared node cache + shared leveldb) for serial replay.
+//
+// Unlike NewLevmSpecFallbackTrieDisk it does NOT create a new temp leveldb,
+// re-encode the witness via BuildWitnessTrie, or start from an empty trie
+// cache: the validation phase already cold-read every node into the shared
+// cache, so serial replay hits memory and pays ~zero disk I/O. It also shares
+// the read-only tx list with worker 0.
+//
+// The returned worker owns an INDEPENDENT (clean) StateDB over the same root,
+// so its state-accumulating ReExecuteCommit/PreExecuteCommit do not disturb
+// pool workers. Do NOT return it via Release — Close it when done (it won't
+// close the pool's shared backing store).
+//
+// Only valid for real-trie pools (NewLevmSpecFallbackPoolTrie).
+func (p *LevmSpecFallbackPool) NewSerialWorker() (*LevmSpecFallback, error) {
+	if len(p.workers) == 0 {
+		return nil, fmt.Errorf("LevmSpecFallbackPool: no workers")
+	}
+	if p.sdb == nil || p.edb == nil {
+		return nil, fmt.Errorf("LevmSpecFallbackPool: NewSerialWorker requires a real-trie pool (NewLevmSpecFallbackPoolTrie)")
+	}
+	block := new(big.Int).SetUint64(p.blockNum)
+	lvm := levm.NewMemoryWithSharedTrie(p.root, p.sdb, p.edb, block, common.Address{})
+	return &LevmSpecFallback{
+		lvm:        lvm,
+		txs:        p.workers[0].txs, // read-only, shared with pool workers
+		blockNum:   p.blockNum,
+		noCloseEdb: true,
+	}, nil
 }
 
 // Close releases every worker's levm + temp leveldb (and the shared backing

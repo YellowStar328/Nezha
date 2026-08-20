@@ -1012,18 +1012,18 @@ func runReplayDepurgeMode(
 	// reads through the real trie path (no simulation).
 	//
 	// The replayer is constructed LAZILY and BEFORE the timer: with --disk-trie
-	// the replayer re-encodes the witness into its own leveldb
-	// (BuildWitnessTrie) — a one-time benchmark-preparation cost that the
-	// serial baseline likewise excludes from its timer (its construction
-	// happens before startSerialBaseline). With zero aborts we skip
-	// construction entirely.
+	// it reuses the pool's shared witness trie (root + leveldb + already-warm
+	// node cache) via NewSerialWorker — no BuildWitnessTrie, no fresh cold
+	// reads, so construction is nearly free. The serial baseline still
+	// re-encodes its own copy (a one-time benchmark-preparation cost excluded
+	// from its timer). With zero aborts we skip construction entirely.
 	var serialReplayer *utils.LevmSpecFallback
 	if len(serialReplayList) > 0 {
 		switch {
 		case trieDisk:
-			serialReplayer, err = utils.NewLevmSpecFallbackTrieDisk(ds, fromBlock, toBlock, trieCacheMB)
+			serialReplayer, err = levmPool.NewSerialWorker()
 			if err != nil {
-				return fmt.Errorf("NewLevmSpecFallbackTrieDisk (serial replay): %w", err)
+				return fmt.Errorf("NewSerialWorker (serial replay): %w", err)
 			}
 			defer serialReplayer.Close()
 		case diskCommit:
@@ -1694,16 +1694,17 @@ func runReplayVegetaMode(
 	// reads through the real trie path (no simulation).
 	//
 	// Constructed LAZILY and BEFORE the timer (same rationale as Depurge
-	// Step 9): the --disk-trie replayer re-encodes the witness into its own
-	// leveldb — a one-time preparation cost that the serial baseline likewise
-	// excludes from its timer. With zero aborts we skip construction.
+	// Step 9): the --disk-trie replayer reuses the pool's shared witness trie
+	// via NewSerialWorker — no BuildWitnessTrie, no fresh cold reads. The
+	// serial baseline still re-encodes its own copy (a one-time preparation
+	// cost excluded from its timer). With zero aborts we skip construction.
 	var serialReplayer *utils.LevmSpecFallback
 	if len(serialReplayList) > 0 {
 		switch {
 		case trieDisk:
-			serialReplayer, err = utils.NewLevmSpecFallbackTrieDisk(ds, fromBlock, toBlock, trieCacheMB)
+			serialReplayer, err = levmPool.NewSerialWorker()
 			if err != nil {
-				return fmt.Errorf("NewLevmSpecFallbackTrieDisk (serial replay): %w", err)
+				return fmt.Errorf("NewSerialWorker (serial replay): %w", err)
 			}
 			defer serialReplayer.Close()
 		case diskCommit:

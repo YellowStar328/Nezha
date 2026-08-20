@@ -14,13 +14,26 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
+// ErrKeyUnresolvable signals that the LLM cache contains an access whose
+// concrete storage key cannot be derived statically — neither by the generic
+// slot machinery nor by a registered calldata-derived key deriver. The caller
+// must fall back to EVM PreExecute for the whole tx; silently dropping the key
+// would under-approximate the conservative set and cause spurious key-exceed
+// aborts during validation.
+var ErrKeyUnresolvable = fmt.Errorf("LLM key unresolvable: mapping/struct key cannot be derived statically")
+
 // MainnetTxArgs holds the decoded address arguments from a tx's calldata.
 // Addr1 = first address-type parameter, Addr2 = second (if exists).
 // MsgSender = tx.from (the EOA that signed the transaction).
+// Selector = the 4-byte function selector (0x-prefixed lowercase).
+// RawCalldata = the raw calldata bytes (including the 4-byte selector),
+// used by calldata-derived key derivers (see mainnet_keyderive.go).
 type MainnetTxArgs struct {
-	Addr1     string // 0x-prefixed lowercase address (or "" if none)
-	Addr2     string // 0x-prefixed lowercase address (or "" if none)
-	MsgSender string // 0x-prefixed lowercase address (tx.from)
+	Addr1       string // 0x-prefixed lowercase address (or "" if none)
+	Addr2       string // 0x-prefixed lowercase address (or "" if none)
+	MsgSender   string // 0x-prefixed lowercase address (tx.from)
+	Selector    string // 0x-prefixed lowercase 8-hex selector
+	RawCalldata []byte // raw calldata bytes including the 4-byte selector
 }
 
 // storageItem is a parsed storage layout entry.
@@ -44,7 +57,15 @@ type MainnetContractManager struct {
 	addrToAlias map[string]string
 	// aliasToAddr maps alias -> address(lowercase)
 	aliasToAddr map[string]string
-	mu          sync.RWMutex
+	// rwSets is an in-memory cache of parsed LLM RW-set analyses:
+	// key = strings.ToLower(address) + ":" + strings.ToLower(selector).
+	// Populated eagerly in LoadAll so hot-path LLM hits never touch the disk.
+	rwSets map[string]*MainnetLLMResponse
+	// itemCache memoizes findStorageItem lookups: "addr:label" -> *storageItem.
+	// Built lazily under mu on first access; layouts are immutable after
+	// LoadAll, so cached pointers stay valid.
+	itemCache map[string]*storageItem
+	mu        sync.RWMutex
 }
 
 // NewMainnetContractManager returns a manager with baseDir = ./cache/mainnet_rw.
@@ -55,6 +76,8 @@ func NewMainnetContractManager() *MainnetContractManager {
 		abis:        make(map[string][]mainnetABIEntry),
 		addrToAlias: make(map[string]string),
 		aliasToAddr: make(map[string]string),
+		rwSets:      make(map[string]*MainnetLLMResponse),
+		itemCache:   make(map[string]*storageItem),
 	}
 }
 
@@ -81,6 +104,10 @@ func (m *MainnetContractManager) LoadAll() error {
 			continue
 		}
 		addr := entry.Name()
+
+		// Eagerly load all per-function RW-set analyses into memory so that
+		// hot-path LLM hits are pure map lookups instead of disk reads.
+		m.loadRWSetCache(addr)
 
 		// Load storage.json if it exists
 		storagePath := filepath.Join(m.baseDir, addr, "storage.json")
@@ -122,6 +149,70 @@ func (m *MainnetContractManager) LoadAll() error {
 	}
 
 	return nil
+}
+
+// loadRWSetCache reads every per-function analysis JSON under the contract's
+// cache directory (all *.json except the special storage/abi/meta/funcs files)
+// and stores the parsed result in m.rwSets. Cache misses on disk are skipped
+// silently; callers fall back to EVM PreExecute as before.
+func (m *MainnetContractManager) loadRWSetCache(addr string) {
+	dirPath := filepath.Join(m.baseDir, addr)
+	names, err := os.ReadDir(dirPath)
+	if err != nil {
+		return
+	}
+	for _, name := range names {
+		if name.IsDir() {
+			continue
+		}
+		fname := name.Name()
+		switch fname {
+		case "storage.json", "abi.json", "meta.json", "funcs.json":
+			continue
+		}
+		if !strings.HasSuffix(fname, ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dirPath, fname))
+		if err != nil {
+			continue
+		}
+		var resp MainnetLLMResponse
+		if jerr := json.Unmarshal(data, &resp); jerr != nil {
+			continue
+		}
+		selector := strings.TrimSuffix(fname, ".json")
+		m.rwSets[strings.ToLower(addr)+":"+strings.ToLower(selector)] = &resp
+	}
+}
+
+// IsRWSetCached reports whether an LLM analysis for (address, selector) is
+// present in the in-memory cache (i.e. a cache file existed at LoadAll time).
+// The hot path uses this to skip the full GetConservativeRWSet machinery —
+// including calldata decoding and a failed disk open — for known misses.
+// Note: analyses written to disk after LoadAll are not visible here and fall
+// back to EVM PreExecute, which is conservative and correct.
+func (m *MainnetContractManager) IsRWSetCached(address, selector string) bool {
+	key := strings.ToLower(address) + ":" + strings.ToLower(selector)
+	m.mu.RLock()
+	_, ok := m.rwSets[key]
+	m.mu.RUnlock()
+	return ok
+}
+
+// loadLLMResponse returns the parsed LLM analysis for (address, selector),
+// preferring the in-memory cache populated by LoadAll. On a cache miss it falls
+// back to reading the file from disk, so analyses written after LoadAll (e.g.
+// by the pre-analysis tool) are still picked up.
+func (m *MainnetContractManager) loadLLMResponse(address, selector string) (*MainnetLLMResponse, error) {
+	key := strings.ToLower(address) + ":" + strings.ToLower(selector)
+	m.mu.RLock()
+	resp, ok := m.rwSets[key]
+	m.mu.RUnlock()
+	if ok {
+		return resp, nil
+	}
+	return loadMainnetLLMCache(address, selector)
 }
 
 // parseMainnetStorageLayout parses a solc storage layout JSON into []storageItem.
@@ -178,7 +269,7 @@ func parseMainnetStorageLayout(data []byte) ([]storageItem, error) {
 // analysis for (address, selector), converts the abstract reads/writes to
 // concrete acct:/slot: keys, and recursively merges cross-contract calls.
 func (m *MainnetContractManager) GetConservativeRWSet(address, selector string, args MainnetTxArgs) (readKeys, writeKeys []string, err error) {
-	resp, err := loadMainnetLLMCache(address, selector)
+	resp, err := m.loadLLMResponse(address, selector)
 	if err != nil {
 		return nil, nil, ErrNotPreAnalyzed
 	}
@@ -193,8 +284,15 @@ func (m *MainnetContractManager) GetConservativeRWSet(address, selector string, 
 		return nil, nil, ErrUnresolvableAccount
 	}
 
-	readKeys = m.abstractToKeys(address, resp.Reads, args)
-	writeKeys = m.abstractToKeys(address, resp.Writes, args)
+	var unresolved bool
+	readKeys, unresolved = m.abstractToKeys(address, resp.Reads, args, false)
+	if unresolved {
+		return nil, nil, ErrKeyUnresolvable
+	}
+	writeKeys, unresolved = m.abstractToKeys(address, resp.Writes, args, true)
+	if unresolved {
+		return nil, nil, ErrKeyUnresolvable
+	}
 
 	if len(resp.CrossCalls) > 0 {
 		extraReads, extraWrites, crossErr := m.mergeCrossCalls(address, resp.CrossCalls, args, 0)
@@ -213,14 +311,20 @@ func (m *MainnetContractManager) GetConservativeRWSet(address, selector string, 
 
 // abstractToKeys converts each abstract {account, field} access to concrete
 // slot: key strings for the given contract address. Nested mappings may emit
-// multiple concrete keys for a single abstract access (see abstractAccessToKeys).
-func (m *MainnetContractManager) abstractToKeys(contractAddr string, accesses []LLMFieldAccess, args MainnetTxArgs) []string {
+// multiple concrete keys for a single abstract access (see
+// abstractAccessToKeys). The returned unresolved flag is set when ANY access
+// cannot be converted statically — the caller must treat the whole tx as
+// unresolvable and fall back to EVM PreExecute instead of dropping keys.
+func (m *MainnetContractManager) abstractToKeys(contractAddr string, accesses []LLMFieldAccess, args MainnetTxArgs, write bool) ([]string, bool) {
 	var keys []string
 	for _, acc := range accesses {
-		more := m.abstractAccessToKeys(contractAddr, acc, args)
+		more, unresolved := m.abstractAccessToKeys(contractAddr, acc, args, write)
+		if unresolved {
+			return nil, true
+		}
 		keys = append(keys, more...)
 	}
-	return keys
+	return keys, false
 }
 
 // resolveAccountAddr translates a LLM account tag (addr1 / addr2 /
@@ -274,52 +378,86 @@ func collectAvailableAddrs(args MainnetTxArgs) []string {
 }
 
 // abstractAccessToKeys converts a single abstract access to one or more
-// concrete slot: keys. It returns an empty slice when the access cannot be
-// converted statically and should be skipped.
+// concrete slot: keys. The returned unresolved flag is set when the key cannot
+// be derived statically — neither by the generic slot machinery nor by a
+// registered calldata-derived key deriver. The caller must then mark the whole
+// tx as unresolvable (EVM PreExecute fallback). We NEVER silently drop a key,
+// because that would under-approximate the conservative set and cause spurious
+// key-exceed aborts during validation.
 //
 // For NESTED mappings (IsNested==true), a single {account,field} access
-// represents ONE key of the 2-level structure. Because we don't know which
-// level this account occupies, we conservatively emit the cartesian-product
-// double-hash keys: for each resolved address `x` in {addr1,addr2,msg.sender}
-// we output nestedMappingSlotKey(account_addr, x) AND
-// nestedMappingSlotKey(x, account_addr) plus the single-level hashes of both.
+// represents ONE key of the 2-level structure. When no deriver is registered,
+// we don't know statically which level this account occupies, so we
+// conservatively emit the cartesian-product double-hash keys: for each
+// resolved address `x` in {addr1,addr2,msg.sender} we output
+// nestedMappingSlotKey(account_addr, x) AND nestedMappingSlotKey(x, account_addr).
 // This is conservative over-approximation that guarantees the real key is
 // present. Any extra keys cannot cause aborts (they only widen RW sets).
-func (m *MainnetContractManager) abstractAccessToKeys(contractAddr string, acc LLMFieldAccess, args MainnetTxArgs) []string {
+func (m *MainnetContractManager) abstractAccessToKeys(contractAddr string, acc LLMFieldAccess, args MainnetTxArgs, write bool) ([]string, bool) {
 	item, found := m.findStorageItem(contractAddr, acc.Field)
 	if !found {
-		fmt.Printf("Warning: field %q not found in storage layout for %s\n", acc.Field, contractAddr)
-		return nil
+		// The LLM referenced a field that does not exist in the storage layout
+		// (or the contract has no layout at all). We can neither derive a key
+		// nor prove the access is harmless — under parallel DAG execution the
+		// phantom field MAY be touched by real execution (observed on mainnet
+		// block 24000000 for a 0xba83b5ed transfer where _balances WAS
+		// accessed). Mark it unresolved so the tx falls back to EVM PreExecute
+		// instead of dropping the key and risking a key-exceed abort.
+		fmt.Printf("Warning: field %q not found in storage layout for %s is unresolvable\n", acc.Field, contractAddr)
+		return nil, true
 	}
 
 	switch {
 	case acc.Account == "global":
 		// Case 1: direct global variable access.
 		if item.KeyType != "simple" {
-			fmt.Printf("Warning: global access to non-simple field %s (keyType=%s) in %s\n", acc.Field, item.KeyType, contractAddr)
-			return nil
+			// A mapping/struct accessed as "global" has no static key. First
+			// try a registered calldata-derived key deriver (e.g.
+			// receiveMessage's usedNonces). If none can handle it, mark the
+			// tx unresolved instead of silently dropping the access.
+			if keys, handled, unresolved := m.tryKeyDeriver(contractAddr, acc, args, write); handled {
+				if unresolved {
+					fmt.Printf("Warning: global access to non-simple field %s (keyType=%s) in %s is unresolvable\n", acc.Field, item.KeyType, contractAddr)
+					return nil, true
+				}
+				return keys, false
+			}
+			fmt.Printf("Warning: global access to non-simple field %s (keyType=%s) in %s is unresolvable\n", acc.Field, item.KeyType, contractAddr)
+			return nil, true
 		}
-		return []string{simpleSlotKey(contractAddr, item.Slot)}
+		return []string{simpleSlotKey(contractAddr, item.Slot)}, false
 
 	case item.KeyType == "simple":
 		// Single-level global access disguised as an account access: safe fallback.
-		return []string{simpleSlotKey(contractAddr, item.Slot)}
+		return []string{simpleSlotKey(contractAddr, item.Slot)}, false
 
 	case item.KeyType == "mapping" && !item.IsNested:
 		// Case 2 (non-nested mapping): build single-level key using the account.
 		addr, ok := resolveAccountAddr(acc.Account, args)
 		if !ok {
 			// Case 4 fallback: account is a global-var-name-as-key. Cannot
-			// resolve statically; skip.
-			return nil
+			// resolve statically → unresolved.
+			return nil, true
 		}
-		return []string{mappingSlotKey(contractAddr, addr, item.Slot)}
+		return []string{mappingSlotKey(contractAddr, addr, item.Slot)}, false
 
 	case item.KeyType == "mapping" && item.IsNested:
-		// Case 3 (NESTED mapping, e.g. allowed[_from][msg.sender]):
-		// {acc.Account, field} represents ONE level of the 2-level key. We
-		// don't know statically whether it's the outer or inner key, so we
-		// emit both orientations plus all cross-products with the other
+		// Case 3 (NESTED mapping, e.g. allowed[_from][msg.sender]).
+		// A registered deriver may resolve the exact key from calldata
+		// (e.g. CoinTool.t: map[msg.sender][_salt] where the inner key is a
+		// dynamic bytes). If one is registered for this contract+selector it
+		// decides the outcome — success yields the exact keys, failure means
+		// the tx is unresolvable (never fall through to the cartesian guess,
+		// which would emit wrong keys and under-approximate).
+		if keys, handled, unresolved := m.tryKeyDeriver(contractAddr, acc, args, write); handled {
+			if unresolved {
+				return nil, true
+			}
+			return keys, false
+		}
+		// No deriver: {acc.Account, field} represents ONE level of the 2-level
+		// key. We don't know statically whether it's the outer or inner key,
+		// so we emit both orientations plus all cross-products with the other
 		// known addresses in the tx — this is guaranteed to cover the true
 		// key. For example:
 		//   allowed access with account=addr1 should emit:
@@ -329,8 +467,8 @@ func (m *MainnetContractManager) abstractAccessToKeys(contractAddr string, acc L
 		accAddr, ok := resolveAccountAddr(acc.Account, args)
 		if !ok {
 			// Cannot resolve the account statically; if it's a
-			// global-var-as-key we also don't have the runtime value. Skip.
-			return nil
+			// global-var-as-key we also don't have the runtime value.
+			return nil, true
 		}
 		others := collectAvailableAddrs(args)
 		var out []string
@@ -351,29 +489,69 @@ func (m *MainnetContractManager) abstractAccessToKeys(contractAddr string, acc L
 				out = append(out, k2)
 			}
 		}
-		return out
+		return out, false
 
 	default:
 		// KeyType == "string" or other unsupported — no static key.
 		fmt.Printf("Warning: unsupported key type %q for field %s accessed with %s\n", item.KeyType, acc.Field, acc.Account)
-		return nil
+		return nil, true
 	}
+}
+
+// tryKeyDeriver consults the calldata-derived key deriver registry (keyed by
+// "contractAddr:selector"). It returns:
+//
+//   - (nil, false, _)  : no deriver registered → caller proceeds with the
+//     generic static machinery.
+//   - (nil, true, true): a deriver is registered but cannot derive the key →
+//     the access is unresolvable (EVM PreExecute fallback).
+//   - (keys, true, false): the deriver derived the exact conservative keys.
+func (m *MainnetContractManager) tryKeyDeriver(contractAddr string, acc LLMFieldAccess, args MainnetTxArgs, write bool) ([]string, bool, bool) {
+	deriver, ok := derivedKeyDerivers[strings.ToLower(contractAddr)+":"+strings.ToLower(args.Selector)]
+	if !ok {
+		return nil, false, false
+	}
+	dk, ok := deriver(contractAddr, acc, args)
+	if !ok {
+		return nil, true, true
+	}
+	if write {
+		return dk.WriteKeys, true, false
+	}
+	return dk.ReadKeys, true, false
 }
 
 // findStorageItem looks up a storage item by label in the cached layout.
 func (m *MainnetContractManager) findStorageItem(contractAddr, label string) (*storageItem, bool) {
+	cacheKey := contractAddr + ":" + label
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	if it, ok := m.itemCache[cacheKey]; ok {
+		m.mu.RUnlock()
+		return it, true
+	}
 	items, ok := m.layouts[contractAddr]
 	if !ok {
+		m.mu.RUnlock()
 		return nil, false
 	}
+	var found *storageItem
 	for i := range items {
 		if items[i].Label == label {
-			return &items[i], true
+			found = &items[i]
+			break
 		}
 	}
-	return nil, false
+	m.mu.RUnlock()
+	if found == nil {
+		return nil, false
+	}
+	// Store under a short write-lock. Layouts are immutable after LoadAll, so
+	// the pointer remains valid; a benign race (two goroutines storing the
+	// same entry) is harmless.
+	m.mu.Lock()
+	m.itemCache[cacheKey] = found
+	m.mu.Unlock()
+	return found, true
 }
 
 // mergeCrossCalls recursively merges conservative RW sets from cross-contract
@@ -390,14 +568,22 @@ func (m *MainnetContractManager) mergeCrossCalls(callerAddr string, calls []Main
 			return nil, nil, fmt.Errorf("%w: alias %q not registered", ErrCrossContractNotCached, call.Contract)
 		}
 
-		subResp, loadErr := loadMainnetLLMCache(targetAddr, call.Function)
+		subResp, loadErr := m.loadLLMResponse(targetAddr, call.Function)
 		if loadErr != nil {
 			return nil, nil, fmt.Errorf("%w: %s:%s", ErrCrossContractNotCached, targetAddr, call.Function)
 		}
 
-		// Convert using the TARGET contract's address.
-		subReads := m.abstractToKeys(targetAddr, subResp.Reads, args)
-		subWrites := m.abstractToKeys(targetAddr, subResp.Writes, args)
+		// Convert using the TARGET contract's address. An unresolvable key in
+		// the sub-contract analysis is as dangerous as one in the caller's own
+		// analysis — propagate it so the whole tx falls back to EVM.
+		subReads, rUnres := m.abstractToKeys(targetAddr, subResp.Reads, args, false)
+		if rUnres {
+			return nil, nil, ErrKeyUnresolvable
+		}
+		subWrites, wUnres := m.abstractToKeys(targetAddr, subResp.Writes, args, true)
+		if wUnres {
+			return nil, nil, ErrKeyUnresolvable
+		}
 		extraReads = append(extraReads, subReads...)
 		extraWrites = append(extraWrites, subWrites...)
 
@@ -576,6 +762,64 @@ func nestedMappingSlotKey(contractAddr, outerAddr, innerAddr string, slot uint64
 	// Step 2: keccak256(paddedInnerAddr || innerSlot)  [no second slot append]
 	h2 := sha3.NewLegacyKeccak256()
 	h2.Write(pad32(addrToBytes(innerAddr)))
+	h2.Write(innerSlot)
+	finalHash := h2.Sum(nil)
+
+	return fmt.Sprintf("slot:%s:%s", strings.ToLower(contractAddr), hexSlot(finalHash))
+}
+
+// keccak256Bytes returns the LegacyKeccak256 hash of data.
+func keccak256Bytes(data []byte) []byte {
+	h := sha3.NewLegacyKeccak256()
+	h.Write(data)
+	return h.Sum(nil)
+}
+
+// rightPad32 pads data with trailing zeros up to a multiple of 32 bytes.
+// This is Solidity's encoding for dynamic bytes keys inside mappings
+// (keccak256 of the right-padded bytes).
+func rightPad32(data []byte) []byte {
+	n := ((len(data) + 31) / 32) * 32
+	padded := make([]byte, n)
+	copy(padded, data)
+	return padded
+}
+
+// mappingSlotKeyBytes32 builds the value slot for a single-key mapping keyed
+// by bytes32 (e.g. usedNonces: mapping(bytes32 => uint256)):
+//
+//	slot_key = keccak256(key32 || pad32(slot))
+func mappingSlotKeyBytes32(contractAddr string, key32 []byte, slot uint64) string {
+	keyBytes := pad32(key32)
+	slotBytes := slotToBytes(slot)
+	h := sha3.NewLegacyKeccak256()
+	h.Write(keyBytes)
+	h.Write(slotBytes)
+	slotHash := h.Sum(nil)
+	return fmt.Sprintf("slot:%s:%s", strings.ToLower(contractAddr), hexSlot(slotHash))
+}
+
+// nestedBytesMappingSlotKey builds the value slot for
+// mapping(address => mapping(bytes => V)) where the inner key is a dynamic
+// bytes value from calldata (e.g. CoinTool.t: map[msg.sender][_salt]).
+//
+// Verified against real mainnet storage access (block 24000000, CoinTool_App
+// tx 176/187): Solidity uses the UNPADDED bytes data as h(k) for bytes/string
+// mapping keys ("h(k) is just the unpadded data"), concatenated directly with
+// the inner mapping base slot:
+//
+//	inner_slot = keccak256(pad32(outerAddr) || pad32(baseSlot))
+//	value_slot = keccak256(innerBytes || inner_slot)
+func nestedBytesMappingSlotKey(contractAddr, outerAddr string, innerBytes []byte, slot uint64) string {
+	// Step 1: keccak256(paddedOuterAddr || paddedBaseSlot)
+	h1 := sha3.NewLegacyKeccak256()
+	h1.Write(pad32(addrToBytes(outerAddr)))
+	h1.Write(slotToBytes(slot))
+	innerSlot := h1.Sum(nil)
+
+	// Step 2: keccak256(unpaddedBytes || innerSlot)
+	h2 := sha3.NewLegacyKeccak256()
+	h2.Write(innerBytes)
 	h2.Write(innerSlot)
 	finalHash := h2.Sum(nil)
 

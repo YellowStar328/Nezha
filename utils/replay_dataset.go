@@ -242,3 +242,69 @@ func (dr *DatasetReader) LoadBlockWitness(blockNum uint64) (*ReplayBlockWitness,
 	}
 	return blk.Witness, nil
 }
+
+// LoadBlockRange loads blocks [fromBlock, toBlock] and concatenates their
+// Refs + Canonical into a single synthetic ReplayBlock. This is used by the
+// multi-block replay mode where txs from a range of blocks are scheduled
+// together against a single baseline state (the witness of fromBlock).
+//
+// The returned ReplayBlock has:
+//   - BlockNum = fromBlock
+//   - BlockHash = fromBlock's hash
+//   - TxCount = total txs across all blocks
+//   - Refs = concatenated refs (each preserves its original BlockNum + TxIndex)
+//   - Canonical = concatenated canonical RW sets
+func (dr *DatasetReader) LoadBlockRange(fromBlock, toBlock uint64) (*core.ReplayBlock, error) {
+	if fromBlock > toBlock {
+		return nil, fmt.Errorf("fromBlock %d > toBlock %d", fromBlock, toBlock)
+	}
+	if fromBlock < uint64(dr.manifest.FromBlock) || toBlock > uint64(dr.manifest.ToBlock) {
+		return nil, fmt.Errorf("range [%d,%d] outside manifest [%d,%d]",
+			fromBlock, toBlock, dr.manifest.FromBlock, dr.manifest.ToBlock)
+	}
+
+	var allRefs []core.ReplayRef
+	var allCanonical []core.CanonicalRWSet
+	var firstBlockHash string
+	var firstTimestamp uint64
+
+	for bn := fromBlock; bn <= toBlock; bn++ {
+		blk, err := dr.LoadBlock(bn)
+		if err != nil {
+			return nil, fmt.Errorf("LoadBlock %d: %w", bn, err)
+		}
+		if bn == fromBlock {
+			firstBlockHash = blk.BlockHash
+			firstTimestamp = blk.Timestamp
+		}
+		allRefs = append(allRefs, blk.Refs...)
+		allCanonical = append(allCanonical, blk.Canonical...)
+	}
+
+	return &core.ReplayBlock{
+		BlockNum:  fromBlock,
+		BlockHash: firstBlockHash,
+		Timestamp: firstTimestamp,
+		TxCount:   len(allRefs),
+		Refs:      allRefs,
+		Canonical: allCanonical,
+	}, nil
+}
+
+// LoadBlockRangeTxs loads raw transactions from blocks [fromBlock, toBlock]
+// and concatenates them into a single slice. The txs are in block order then
+// intra-block order. Used by LevmSpecFallback to execute multi-block ranges.
+func (dr *DatasetReader) LoadBlockRangeTxs(fromBlock, toBlock uint64) ([]RawTransaction, error) {
+	if fromBlock > toBlock {
+		return nil, fmt.Errorf("fromBlock %d > toBlock %d", fromBlock, toBlock)
+	}
+	var allTxs []RawTransaction
+	for bn := fromBlock; bn <= toBlock; bn++ {
+		txs, err := dr.LoadBlockTxs(bn)
+		if err != nil {
+			return nil, fmt.Errorf("LoadBlockTxs %d: %w", bn, err)
+		}
+		allTxs = append(allTxs, txs...)
+	}
+	return allTxs, nil
+}

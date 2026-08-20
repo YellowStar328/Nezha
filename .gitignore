@@ -2,13 +2,19 @@
 test
 nezha
 replay-test
+Nezha_test_replay
+mainnet-preanalyze
 contracts.yaml
 
 # 数据库目录
 DAG_*
 
 # 结果文件
-Exp_results.txt
+Exp_results*.txt
+*.bak.txt
+
+# 日志
+*.log
 
 # Go 编译文件
 *.exe
@@ -29,3 +35,4 @@ debug-nezha-validation-abort.md
 .trae/*
 datasets/
 data_check/
+cache/

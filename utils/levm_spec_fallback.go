@@ -48,21 +48,26 @@ type LevmSpecFallback struct {
 // loaded from the dataset and injected into the EVM stateDB so that contract
 // code and storage are available for execution.
 //
+// When fromBlock < toBlock, the witness is loaded from fromBlock only (the
+// "baseline" block), while transactions are loaded from all blocks in
+// [fromBlock, toBlock] and concatenated. This lets the scheduler process
+// multiple blocks' worth of txs against a single baseline state.
+//
 // Memory backing is critical for concurrent pools: N workers each with their
 // own leveldb would cause IOPS contention; in-memory StateDB has no disk I/O
 // at all, so snapshot/revert is pure journal manipulation.
-func NewLevmSpecFallback(ds *DatasetReader, blockNum uint64) (*LevmSpecFallback, error) {
-	txs, err := ds.LoadBlockTxs(blockNum)
+func NewLevmSpecFallback(ds *DatasetReader, fromBlock, toBlock uint64) (*LevmSpecFallback, error) {
+	txs, err := ds.LoadBlockRangeTxs(fromBlock, toBlock)
 	if err != nil {
-		return nil, fmt.Errorf("load block txs %d: %w", blockNum, err)
+		return nil, fmt.Errorf("load block range txs [%d,%d]: %w", fromBlock, toBlock, err)
 	}
-	witness, err := ds.LoadBlockWitness(blockNum)
+	witness, err := ds.LoadBlockWitness(fromBlock)
 	if err != nil {
-		return nil, fmt.Errorf("load block witness %d: %w", blockNum, err)
+		return nil, fmt.Errorf("load block witness %d: %w", fromBlock, err)
 	}
 
 	// In-memory levm — no tmpDir, no leveldb, no disk I/O.
-	lvm := levm.NewMemory(new(big.Int).SetUint64(blockNum), common.Address{})
+	lvm := levm.NewMemory(new(big.Int).SetUint64(fromBlock), common.Address{})
 
 	sdb := lvm.GetStateDB()
 	if sdb == nil {
@@ -75,7 +80,7 @@ func NewLevmSpecFallback(ds *DatasetReader, blockNum uint64) (*LevmSpecFallback,
 	return &LevmSpecFallback{
 		lvm:      lvm,
 		txs:      txs,
-		blockNum: blockNum,
+		blockNum: fromBlock,
 	}, nil
 }
 
@@ -166,11 +171,6 @@ func (f *LevmSpecFallback) PreExecute(blockNum uint64, txIdx int) (*core.ReplayR
 	// Always revert to keep the witness baseline for the next PreExecute call.
 	sdb.RevertToSnapshot(snap)
 
-	// Canonical contract address for slot-key prefixing. Contract creation txs
-	// have no "to"; their writes go to the new contract address, which is
-	// derived from (from, nonce). For now, treat creation writes as having an
-	// empty address prefix — they are rare in mainnet replay and don't affect
-	// the depurge conflict logic (creation storage is isolated).
 	var contractAddr common.Address
 	if toPtr != nil {
 		contractAddr = *toPtr
@@ -701,18 +701,21 @@ type LevmSpecFallbackPool struct {
 //
 // Each worker pays the one-time cost of levm.New + witness injection (~100ms
 // each); this is amortized across all PreExecute/ReExecute calls in the block.
-func NewLevmSpecFallbackPool(ds *DatasetReader, blockNum uint64, n int) (*LevmSpecFallbackPool, error) {
+//
+// When fromBlock < toBlock, the witness is from fromBlock; txs are concatenated
+// from all blocks in [fromBlock, toBlock].
+func NewLevmSpecFallbackPool(ds *DatasetReader, fromBlock, toBlock uint64, n int) (*LevmSpecFallbackPool, error) {
 	if n <= 0 {
 		n = runtime.NumCPU()
 	}
 	pool := &LevmSpecFallbackPool{
 		workers:  make([]*LevmSpecFallback, n),
 		idle:     make(chan *LevmSpecFallback, n),
-		blockNum: blockNum,
+		blockNum: fromBlock,
 		n:        n,
 	}
 	for i := 0; i < n; i++ {
-		fb, err := NewLevmSpecFallback(ds, blockNum)
+		fb, err := NewLevmSpecFallback(ds, fromBlock, toBlock)
 		if err != nil {
 			// cleanup already-created workers
 			for j := 0; j < i; j++ {

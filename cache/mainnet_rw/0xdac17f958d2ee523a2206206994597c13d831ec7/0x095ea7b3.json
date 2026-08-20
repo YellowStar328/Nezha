@@ -7,10 +7,6 @@
     {
       "account": "addr1",
       "field": "allowed"
-    },
-    {
-      "account": "global",
-      "field": "deprecated"
     }
   ],
   "writes": [

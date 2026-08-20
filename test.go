@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,6 +41,38 @@ const dbFile7 = "DAG_Depurge"       // 为Depurge算法预留的数据库
 const dbFile8 = "DAG_NezhaVariable" // 为 Nezha_variable 算法预留的数据库
 const dbFile9 = "DAG_Vegeta"        // 为 Vegeta 算法预留的数据库
 const fileName = "Exp_results.txt"
+
+// parseBlockRange parses a block number or range string.
+//
+// Accepted formats:
+//
+//	"24000000"       → from=24000000, to=24000000 (single block)
+//	"24000000-24000009" → from=24000000, to=24000009 (range)
+//
+// Returns an error if the string is empty, contains more than one '-',
+// or if fromBlock > toBlock.
+func parseBlockRange(s string) (fromBlock, toBlock uint64, err error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0, fmt.Errorf("empty block number")
+	}
+	parts := strings.SplitN(s, "-", 2)
+	from, err := strconv.ParseUint(parts[0], 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid from-block %q: %w", parts[0], err)
+	}
+	if len(parts) == 1 {
+		return from, from, nil
+	}
+	to, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid to-block %q: %w", parts[1], err)
+	}
+	if from > to {
+		return 0, 0, fmt.Errorf("from-block %d > to-block %d", from, to)
+	}
+	return from, to, nil
+}
 
 func main() {
 	var addrNum uint64
@@ -74,18 +107,29 @@ func main() {
 	// Replay mode flags (mainnet block replay via eth-replayd).
 	var replaydURL string
 	var datasetDir string
-	var blockNumReplay uint64
+	var blockNumStr string
 	var replayDepurge bool
+	var replayVegeta bool
 	flag.StringVar(&replaydURL, "replayd", "", "eth-replayd HTTP endpoint (enables replay mode)")
 	flag.StringVar(&datasetDir, "dataset", "", "Path to mainnet dataset directory (replay mode)")
-	flag.Uint64Var(&blockNumReplay, "block-num", 24000000, "Block number to replay (replay mode)")
+	flag.StringVar(&blockNumStr, "block-num", "24000000", "Block number or range a-b to replay (replay mode)")
 	flag.BoolVar(&replayDepurge, "replay-depurge", false, "Run pure-levm Depurge on mainnet block (no HTTP, uses LLM static analysis + LevmSpecFallback)")
+	flag.BoolVar(&replayVegeta, "replay-vegeta", false, "Run pure-levm Vegeta on mainnet block (no HTTP, uses EVM PreExecute + LevmSpecFallback)")
 	flag.Parse()
 
-	// Replay-depurge mode: pure-levm path (no HTTP, no replayd). Runs the full
-	// Depurge algorithm on a mainnet block using LLM static analysis for
-	// conservative RW sets and in-process levm for re-execution.
-	if replayDepurge {
+	// Parse block-num: either "N" (single block) or "A-B" (range).
+	// For a range, the witness is loaded from A (baseline); txs are loaded
+	// from all blocks [A, B] and scheduled together as one combined set.
+	fromBlock, toBlock, err := parseBlockRange(blockNumStr)
+	if err != nil {
+		log.Fatalf("invalid -block-num %q: %v", blockNumStr, err)
+	}
+
+	// Replay-depurge / replay-vegeta: pure-levm path (no HTTP, no replayd).
+	// Both flags can be specified together to run both algorithms in one
+	// process, sharing the same output file (results appended in order,
+	// mirroring test.go's all-in-one TestDepurge + TestVegeta pattern).
+	if replayDepurge || replayVegeta {
 		file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0666)
 		if err != nil {
 			log.Fatalf("open output file: %v", err)
@@ -98,8 +142,23 @@ func main() {
 		w.WriteString(fmt.Sprintf("===================================================\n"))
 		w.Flush()
 
-		if err := runReplayDepurgeMode(w, datasetDir, blockNumReplay); err != nil {
-			log.Fatalf("replay depurge mode: %v", err)
+		// Depurge runs first (uses LLM cache, read-only); Vegeta runs second
+		// (pure EVM PreExecute). Each opens its own LevmSpecFallbackPool +
+		// serial baseline levm with defer Close(), so no state leaks between
+		// the two runs — only the in-process witness baseline is re-injected.
+		if replayDepurge {
+			w.WriteString(fmt.Sprintf("\n>>> Replay Depurge <<<\n"))
+			w.Flush()
+			if err := runReplayDepurgeMode(w, datasetDir, fromBlock, toBlock); err != nil {
+				log.Fatalf("replay depurge mode: %v", err)
+			}
+		}
+		if replayVegeta {
+			w.WriteString(fmt.Sprintf("\n>>> Replay Vegeta <<<\n"))
+			w.Flush()
+			if err := runReplayVegetaMode(w, datasetDir, fromBlock, toBlock); err != nil {
+				log.Fatalf("replay vegeta mode: %v", err)
+			}
 		}
 		return
 	}
@@ -118,13 +177,13 @@ func main() {
 		w.WriteString(fmt.Sprintf("===================================================\n"))
 		w.Flush()
 
-		if err := runReplayMode(w, datasetDir, replaydURL, blockNumReplay, serial, CG, Depurge); err != nil {
+		if err := runReplayMode(w, datasetDir, replaydURL, fromBlock, serial, CG, Depurge); err != nil {
 			log.Fatalf("replay mode: %v", err)
 		}
 		return
 	}
 
-	err := utils.InitContractManager("./config/contracts.yaml")
+	err = utils.InitContractManager("./config/contracts.yaml")
 	if err != nil {
 		log.Fatalf("Failed to init contract manager: %v", err)
 	}

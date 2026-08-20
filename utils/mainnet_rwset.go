@@ -131,6 +131,13 @@ func loadMainnetLLMCache(address, selector string) (*MainnetLLMResponse, error) 
 //     Empty array [] returns an empty map (e.g. minimal proxy with no funcs).
 //   - map[string]string — legacy flat map
 //   - map[string]{"name":...} — legacy object map
+//
+// ReadFuncsMap reads funcs.json for a contract and returns the selector→name
+// mapping. Exported for diagnostics (abort logging in runReplayDepurgeMode).
+func ReadFuncsMap(address string) (map[string]string, error) {
+	return readFuncsMap(address)
+}
+
 func readFuncsMap(address string) (map[string]string, error) {
 	data, err := readContractFile(address, "funcs.json")
 	if err != nil {

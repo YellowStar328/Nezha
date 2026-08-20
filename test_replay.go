@@ -24,6 +24,7 @@ const (
 	dbFileReplaySerial  = "REPLAY_Serial"
 	dbFileReplayCG      = "REPLAY_CG"
 	dbFileReplayDepurge = "REPLAY_Depurge"
+	dbFileReplayVegeta  = "REPLAY_Vegeta"
 )
 
 // runReplayMode is the new entry point driven by --dataset + --replayd flags.
@@ -543,9 +544,9 @@ func replayOrderedAbortList(aborted []bool) []int {
 func runReplayDepurgeMode(
 	writer *bufio.Writer,
 	datasetDir string,
-	blockNum uint64,
+	fromBlock, toBlock uint64,
 ) error {
-	// --- Step 1: open dataset + load block ---
+	// --- Step 1: open dataset + load block range ---
 	ds, err := utils.NewDatasetReader(datasetDir)
 	if err != nil {
 		return fmt.Errorf("open dataset: %w", err)
@@ -554,12 +555,20 @@ func runReplayDepurgeMode(
 	writer.WriteString(fmt.Sprintf("Dataset range    : %d - %d\n", man.FromBlock, man.ToBlock))
 	writer.Flush()
 
-	block, err := ds.LoadBlock(blockNum)
+	block, err := ds.LoadBlockRange(fromBlock, toBlock)
 	if err != nil {
-		return fmt.Errorf("dataset.LoadBlock %d: %w", blockNum, err)
+		return fmt.Errorf("dataset.LoadBlockRange [%d,%d]: %w", fromBlock, toBlock, err)
+	}
+	rawTxs, err := ds.LoadBlockRangeTxs(fromBlock, toBlock)
+	if err != nil {
+		return fmt.Errorf("dataset.LoadBlockRangeTxs [%d,%d]: %w", fromBlock, toBlock, err)
 	}
 	txCount := block.TxCount
-	writer.WriteString(fmt.Sprintf("Target block     : %d (%d txs)\n", blockNum, txCount))
+	if fromBlock == toBlock {
+		writer.WriteString(fmt.Sprintf("Target block     : %d (%d txs)\n", fromBlock, txCount))
+	} else {
+		writer.WriteString(fmt.Sprintf("Target blocks    : %d - %d (%d txs)\n", fromBlock, toBlock, txCount))
+	}
 	writer.Flush()
 
 	// --- Step 2: MainnetContractManager (LLM cache) ---
@@ -574,7 +583,7 @@ func runReplayDepurgeMode(
 	// contention. This mirrors the LLMCaptureRWSet pattern (one levm per tx
 	// fallback) but reuses workers across txs to amortize levm.New + witness
 	// injection cost (~100ms each).
-	levmPool, err := utils.NewLevmSpecFallbackPool(ds, blockNum, 0) // 0 → runtime.NumCPU()
+	levmPool, err := utils.NewLevmSpecFallbackPool(ds, fromBlock, toBlock, 0) // 0 → runtime.NumCPU()
 	if err != nil {
 		return fmt.Errorf("NewLevmSpecFallbackPool: %w", err)
 	}
@@ -586,7 +595,7 @@ func runReplayDepurgeMode(
 	// EVM fallbacks concurrently across the pool.
 	startPreAnalysis := time.Now()
 	specExec := utils.NewLLMSpecExecutor(mgr, levmPool)
-	specs, stats, err := specExec.LLMSpecExecuteAllWithStats(ds, blockNum)
+	specs, stats, err := specExec.LLMSpecExecuteAllWithStats(ds, fromBlock, toBlock)
 	if err != nil {
 		return fmt.Errorf("LLMSpecExecuteAll: %w", err)
 	}
@@ -637,16 +646,33 @@ func runReplayDepurgeMode(
 	writer.Flush()
 
 	// --- Step 5: build TransactionContexts from specs ---
+	// PreExecute-failed txs (specs[i]==nil || !Success) have no usable
+	// conservative RW set — feeding them to Depurge only produces spurious
+	// re-execution errors that would abort anyway. Skip the scheduler for
+	// them and route them directly to the serial replay list, so Depurge
+	// only schedules txs that actually have a speculative RW set.
 	txs := utils.RWSetsToRWNodes(specs)
 	contexts := make(map[string]*core.TransactionContext, txCount)
 	txIDToIdx := make(map[string]int, txCount)
+	var serialReplayList []string // pre-populated with PreExecute-failed txs
+	preExecFailedCount := 0
 	for i := range specs {
 		ref := block.Refs[i]
 		txID := ref.TxHash
+		txIDToIdx[txID] = i
+		if specs[i] == nil || !specs[i].Success {
+			// No conservative set → skip Depurge, route straight to serial replay.
+			serialReplayList = append(serialReplayList, txID)
+			preExecFailedCount++
+			continue
+		}
 		nodes := txs[i]
 		ctx := core.RWNodesToContext(txID, utils.ReplayContractName, "", 0, 0, nodes, [20]byte{}, [20]byte{})
 		contexts[txID] = ctx
-		txIDToIdx[txID] = i
+	}
+	if preExecFailedCount > 0 {
+		writer.WriteString(fmt.Sprintf("PreExec-failed (→ serial): %d (skipped Depurge scheduling)\n", preExecFailedCount))
+		writer.Flush()
 	}
 
 	// --- Step 6: committedDelta (incremental overlay) ---
@@ -700,7 +726,9 @@ func runReplayDepurgeMode(
 	validationAborted := 0
 	var noContextCount, reexecErrorCount, keyExceedCount int32
 	var keyExceedLLM, keyExceedPreexec int32 // attribute key-exceed aborts by conservative-key source
-	var serialReplayList []string
+	// serialReplayList declared above (Step 5) and pre-populated with
+	// PreExecute-failed txs. Appended here for re-execution errors and
+	// key-exceed aborts during validation.
 	var serialReplayLock sync.Mutex
 	var abortCountLock sync.Mutex
 	var llmDiffOnce sync.Once     // dump key-diff for the first LLM-sourced abort only
@@ -731,8 +759,14 @@ func runReplayDepurgeMode(
 
 		// Pass only the incremental overlay (prior-tx deltas), NOT the full
 		// committedState. The witness baseline is already in the worker's sdb.
+		//
+		// Filter the overlay to keys in THIS tx's conservative set: a real key
+		// outside the conservative set triggers key-exceed abort → serial
+		// replay anyway, so omitting those overlay entries cannot corrupt
+		// committed state. This cuts the per-tx clone+apply cost from
+		// O(|committedDelta|) to O(|conservativeKeys ∩ committedDelta|).
 		committedDeltaLock.RLock()
-		overlaySnapshot := cloneStringMap(committedDelta)
+		overlaySnapshot := filterOverlayByKeys(committedDelta, conservativeKeySet)
 		committedDeltaLock.RUnlock()
 
 		worker, err := levmPool.Acquire()
@@ -750,7 +784,7 @@ func runReplayDepurgeMode(
 		}
 		defer levmPool.Release(worker)
 
-		result, err := worker.ReExecute(blockNum, txIdx, overlaySnapshot)
+		result, err := worker.ReExecute(fromBlock, txIdx, overlaySnapshot)
 		if err != nil {
 			atomic.AddInt32(&reexecErrorCount, 1)
 			abortCountLock.Lock()
@@ -795,41 +829,22 @@ func runReplayDepurgeMode(
 			} else {
 				atomic.AddInt32(&keyExceedPreexec, 1)
 			}
-			// Dump the FIRST abort's key diff per source so we can see
-			// EXACTLY which keys the conservative set missed AND whether
-			// the gap is a format-encoding mismatch vs a real miss.
-			diffOnce := &llmDiffOnce
-			if !isLLM {
-				diffOnce = &preexecDiffOnce
+			// Dump the abort's key diff so we can see EXACTLY which keys the
+			// conservative set missed AND whether the gap is a format-encoding
+			// mismatch vs a real miss. By default only the FIRST abort per
+			// source is dumped (keeps logs small); set NEZHA_DUMP_DIFF=1 to
+			// dump every abort's full diff.
+			if os.Getenv("NEZHA_DUMP_DIFF") != "" {
+				dumpAbortKeyDiff(txID, txIdx, isLLM, conservativeKeys, conservativeKeySet, realKeySet)
+			} else {
+				diffOnce := &llmDiffOnce
+				if !isLLM {
+					diffOnce = &preexecDiffOnce
+				}
+				diffOnce.Do(func() {
+					dumpAbortKeyDiff(txID, txIdx, isLLM, conservativeKeys, conservativeKeySet, realKeySet)
+				})
 			}
-			diffOnce.Do(func() {
-				var missing []string
-				for k := range realKeySet {
-					if !conservativeKeySet[k] {
-						missing = append(missing, k)
-					}
-				}
-				sort.Strings(missing)
-				src := "preexec"
-				if isLLM {
-					src = "llm"
-				}
-				fmt.Printf("=== FIRST %s-ABORT DIFF (txID=%s, txIdx=%d) ===\n", src, txID, txIdx)
-				fmt.Printf("--- conservative keys (%d) ---\n", len(conservativeKeys))
-				for _, k := range conservativeKeys {
-					fmt.Printf("    %s\n", k)
-				}
-				fmt.Printf("--- real keys (%d, read=%d write=%d) ---\n",
-					len(realKeySet), len(result.RealReadKeys), len(result.RealWriteKeys))
-				for k := range realKeySet {
-					fmt.Printf("    %s\n", k)
-				}
-				fmt.Printf("--- MISSING keys (real but not in conservative, %d) ---\n", len(missing))
-				for _, k := range missing {
-					fmt.Printf("    %s\n", k)
-				}
-				fmt.Printf("=== END DIFF ===\n")
-			})
 			abortCountLock.Lock()
 			validationAborted++
 			abortCountLock.Unlock()
@@ -837,14 +852,35 @@ func runReplayDepurgeMode(
 			serialReplayLock.Lock()
 			serialReplayList = append(serialReplayList, txID)
 			serialReplayLock.Unlock()
-			fmt.Printf("  TX %s: aborted (real keys exceed conservative) - real=%d, conservative=%d, source=%s\n",
-				txID, len(realKeySet), len(conservativeKeySet),
-				func() string {
-					if txIdx >= 0 && txIdx < len(stats.Sources) {
-						return stats.Sources[txIdx]
+			var missing []string
+			for k := range realKeySet {
+				if !conservativeKeySet[k] {
+					missing = append(missing, k)
+				}
+			}
+			sort.Strings(missing)
+			src := "?"
+			if txIdx >= 0 && txIdx < len(stats.Sources) {
+				src = stats.Sources[txIdx]
+			}
+			// Raw tx info for diagnostics.
+			toAddr := ""
+			selector := ""
+			funcName := ""
+			if txIdx >= 0 && txIdx < len(rawTxs) {
+				toAddr = strings.ToLower(rawTxs[txIdx].To)
+				if len(rawTxs[txIdx].Input) >= 10 {
+					selector = strings.ToLower(rawTxs[txIdx].Input[:10])
+				}
+				if toAddr != "" && selector != "" {
+					if funcs, ferr := utils.ReadFuncsMap(toAddr); ferr == nil {
+						funcName = funcs[selector]
 					}
-					return "?"
-				}())
+				}
+			}
+			fmt.Printf("  TX %s (txIdx=%d, to=%s, selector=%s, func=%s): aborted (real keys exceed conservative) - real=%d, conservative=%d, source=%s, missingKeys=%v\n",
+				txID, txIdx, toAddr, selector, funcName,
+				len(realKeySet), len(conservativeKeySet), src, missing)
 			return
 		}
 
@@ -882,7 +918,23 @@ func runReplayDepurgeMode(
 	})
 	defer validatePool.Release()
 
-	for scheduler.GetReadyQueueLen() > 0 || scheduler.GetPruneReadyQueueLen() > 0 || atomic.LoadInt32(&inProgress) > 0 {
+	// Termination check order matters: read inProgress FIRST, then the queue
+	// lengths. A worker pushes successors to ready/pruneReady inside
+	// Execute/Abort/Prune and only afterwards decrements inProgress (defer).
+	// If inProgress is observed as 0, every push happened-before this read
+	// and no new push can occur (no worker is running), so the subsequent
+	// queue-length reads see frozen state and exiting is safe. Checking the
+	// queues first opened a window where the last worker pushed a successor
+	// and decremented between the two checks — the loop then exited with the
+	// successor still queued and the tx was silently dropped (observed: 20
+	// txs vanished in a 1961-tx run).
+	for {
+		if atomic.LoadInt32(&inProgress) == 0 &&
+			scheduler.GetReadyQueueLen() == 0 &&
+			scheduler.GetPruneReadyQueueLen() == 0 {
+			break
+		}
+
 		for scheduler.GetReadyQueueLen() > 0 {
 			txID := scheduler.PopReady()
 			if txID == "" {
@@ -946,7 +998,7 @@ func runReplayDepurgeMode(
 			override := cloneStringMap(committedDelta)
 			committedDeltaLock.RUnlock()
 
-			result, err := serialReplayer.ReExecuteCommit(blockNum, txIdx, override)
+			result, err := serialReplayer.ReExecuteCommit(fromBlock, txIdx, override)
 			if err != nil {
 				fmt.Printf("  TX %s: serial replay failed (%v)\n", txID, err)
 				firstDone = true
@@ -966,7 +1018,7 @@ func runReplayDepurgeMode(
 			// committedDelta writeback is skipped because it is not read after
 			// serial replay (phase 10 report only reads counters). The stateDB
 			// itself is the source of truth here.
-			if _, err := serialReplayer.PreExecuteCommit(blockNum, txIdx); err != nil {
+			if _, err := serialReplayer.PreExecuteCommit(fromBlock, txIdx); err != nil {
 				fmt.Printf("  TX %s: serial replay failed (%v)\n", txID, err)
 			}
 		}
@@ -1002,7 +1054,7 @@ func runReplayDepurgeMode(
 	// state. We re-inject witness from the dataset.
 	depurgeDur := time.Since(startPreAnalysis)
 
-	serialBaseline, err := utils.NewLevmSpecFallback(ds, blockNum)
+	serialBaseline, err := utils.NewLevmSpecFallback(ds, fromBlock, toBlock)
 	startSerialBaseline := time.Now()
 	if err != nil {
 		return fmt.Errorf("NewLevmSpecFallback (serial baseline): %w", err)
@@ -1024,7 +1076,7 @@ func runReplayDepurgeMode(
 		// Execute WITHOUT snapshot/revert — commit state between txs so
 		// later txs see earlier txs' writes. This is the true serial baseline.
 		t0 := time.Now()
-		rw, err := serialBaseline.PreExecuteCommit(blockNum, txIdx)
+		rw, err := serialBaseline.PreExecuteCommit(fromBlock, txIdx)
 		dur := time.Since(t0)
 		if abortTxSet[txIdx] {
 			abortTxDur += dur
@@ -1063,6 +1115,549 @@ func runReplayDepurgeMode(
 	if serialBaselineDur > 0 {
 		writer.WriteString(fmt.Sprintf("Speedup (serial / Depurge): %.2fx\n",
 			float64(serialBaselineDur)/float64(depurgeDur)))
+	}
+	writer.WriteString(fmt.Sprintf("===================================================\n"))
+	writer.Flush()
+
+	return nil
+}
+
+// dumpAbortKeyDiff prints the full key diff (conservative vs real vs missing)
+// for a key-exceed abort — used to review exactly which keys the LLM analysis
+// (or EVM pre-exec fallback) missed, and whether the gap is a format-encoding
+// mismatch or a genuine analysis miss.
+func dumpAbortKeyDiff(txID string, txIdx int, isLLM bool, conservativeKeys []string,
+	conservativeKeySet, realKeySet map[string]bool) {
+	var missing []string
+	for k := range realKeySet {
+		if !conservativeKeySet[k] {
+			missing = append(missing, k)
+		}
+	}
+	sort.Strings(missing)
+	src := "preexec"
+	if isLLM {
+		src = "llm"
+	}
+	fmt.Printf("=== %s-ABORT DIFF (txID=%s, txIdx=%d) ===\n", src, txID, txIdx)
+	fmt.Printf("--- conservative keys (%d) ---\n", len(conservativeKeys))
+	for _, k := range conservativeKeys {
+		fmt.Printf("    %s\n", k)
+	}
+	fmt.Printf("--- real keys (%d) ---\n", len(realKeySet))
+	for k := range realKeySet {
+		fmt.Printf("    %s\n", k)
+	}
+	fmt.Printf("--- MISSING keys (real but not in conservative, %d) ---\n", len(missing))
+	for _, k := range missing {
+		fmt.Printf("    %s\n", k)
+	}
+	fmt.Printf("=== END DIFF ===\n")
+}
+
+// runReplayVegetaMode runs the pure-levm Vegeta on a single mainnet block.
+// No HTTP, no replayd. All execution happens in-process via LevmSpecFallback.
+//
+// Key differences from runReplayDepurgeMode:
+//   - Conservative RW sets come from EVM PreExecute for ALL txs (no LLM).
+//   - Scheduling follows the Vegeta DAG algorithm (not Depurge's ready/prune
+//     queues): orderedTxs based on key→txID chains, predecessor conflict
+//     detection for DAG edges.
+//   - Validation is batch-level: all ready txs in a batch share the same
+//     committedDelta snapshot, then successful WriteValues are merged after
+//     the batch completes.
+//   - No Prune step (Vegeta does not prune spurious conservative keys).
+func runReplayVegetaMode(
+	writer *bufio.Writer,
+	datasetDir string,
+	fromBlock, toBlock uint64,
+) error {
+	// --- Step 1: open dataset + load block range ---
+	ds, err := utils.NewDatasetReader(datasetDir)
+	if err != nil {
+		return fmt.Errorf("open dataset: %w", err)
+	}
+	man := ds.Manifest()
+	writer.WriteString(fmt.Sprintf("Dataset range    : %d - %d\n", man.FromBlock, man.ToBlock))
+	writer.Flush()
+
+	block, err := ds.LoadBlockRange(fromBlock, toBlock)
+	if err != nil {
+		return fmt.Errorf("dataset.LoadBlockRange [%d,%d]: %w", fromBlock, toBlock, err)
+	}
+	txCount := block.TxCount
+	if fromBlock == toBlock {
+		writer.WriteString(fmt.Sprintf("Target block     : %d (%d txs)\n", fromBlock, txCount))
+	} else {
+		writer.WriteString(fmt.Sprintf("Target blocks    : %d - %d (%d txs)\n", fromBlock, toBlock, txCount))
+	}
+	writer.Flush()
+
+	// --- Step 2: LevmSpecFallbackPool (NumCPU workers) ---
+	levmPool, err := utils.NewLevmSpecFallbackPool(ds, fromBlock, toBlock, 0)
+	if err != nil {
+		return fmt.Errorf("NewLevmSpecFallbackPool: %w", err)
+	}
+	defer levmPool.Close()
+	writer.Flush()
+
+	// --- Step 3: EVM PreExecute for ALL txs (no LLM, no fallback) ---
+	// Every tx gets its conservative RW set from real EVM execution on the
+	// witness base state. This is the key difference from Depurge, which
+	// uses LLM static analysis + EVM fallback.
+	startPreAnalysis := time.Now()
+	txIndices := make([]int, txCount)
+	for i := range txIndices {
+		txIndices[i] = i
+	}
+	specs, errs := levmPool.PreExecuteBatch(txIndices)
+	preAnalysisDur := time.Since(startPreAnalysis)
+
+	preExecOK := 0
+	for _, s := range specs {
+		if s != nil && s.Success {
+			preExecOK++
+		}
+	}
+	// Check for batch errors — any non-nil error means the whole batch failed.
+	var firstErr error
+	for _, e := range errs {
+		if e != nil && firstErr == nil {
+			firstErr = e
+		}
+	}
+	if firstErr != nil {
+		return fmt.Errorf("PreExecuteBatch: %w", firstErr)
+	}
+
+	writer.WriteString(fmt.Sprintf("Time of pre-analysis (EVM PreExecute): %v\n", preAnalysisDur))
+	writer.WriteString(fmt.Sprintf("  PreExecute OK  : %d / %d\n", preExecOK, txCount))
+	writer.WriteString(fmt.Sprintf("  Concurrency    : %d workers\n", runtime.NumCPU()))
+	writer.WriteString(fmt.Sprintf("  Wall time      : ~%.2f ms/tx amortized\n",
+		float64(preAnalysisDur.Milliseconds())/float64(txCount)))
+	writer.WriteString(fmt.Sprintf("===================================================\n"))
+	writer.Flush()
+
+	// --- Step 4: build speculativeRS/speculativeWS maps + txToNodes ---
+	// Mirrors TestVegeta Step 1: build read/write key sets per txID.
+	speculativeRS := make(map[string]map[string]bool, txCount)
+	speculativeWS := make(map[string]map[string]bool, txCount)
+	txToNodes := make(map[string][]*core.RWNode, txCount)
+	txIDToIdx := make(map[string]int, txCount)
+
+	for i := range specs {
+		ref := block.Refs[i]
+		txID := ref.TxHash
+		txIDToIdx[txID] = i
+
+		spec := specs[i]
+		if spec == nil {
+			speculativeRS[txID] = make(map[string]bool)
+			speculativeWS[txID] = make(map[string]bool)
+			txToNodes[txID] = nil
+			continue
+		}
+
+		rSet := make(map[string]bool, len(spec.ReadKeys))
+		wSet := make(map[string]bool, len(spec.WriteKeys))
+		for _, k := range spec.ReadKeys {
+			rSet[k] = true
+		}
+		for _, k := range spec.WriteKeys {
+			wSet[k] = true
+		}
+		speculativeRS[txID] = rSet
+		speculativeWS[txID] = wSet
+
+		// Build RWNodes for this tx (needed for potential future commit path).
+		transInfo := core.TransInfo{
+			ID:        txID,
+			Timestamp: uint32(fromBlock),
+		}
+		nodes := make([]*core.RWNode, 0, len(spec.ReadKeys)+len(spec.WriteKeys))
+		seen := make(map[string]bool, len(spec.ReadKeys)+len(spec.WriteKeys))
+		for _, k := range spec.ReadKeys {
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			nodes = append(nodes, &core.RWNode{
+				RWSet:        core.RWSet{Key: []byte(k), Value: []byte{}},
+				TransInfo:    transInfo,
+				Label:        "r",
+				ContractName: utils.ReplayContractName,
+			})
+		}
+		for _, k := range spec.WriteKeys {
+			if seen[k] {
+				for idx := range nodes {
+					if string(nodes[idx].RWSet.Key) == k && nodes[idx].Label == "r" {
+						nodes[idx].Label = "w"
+						break
+					}
+				}
+				continue
+			}
+			seen[k] = true
+			nodes = append(nodes, &core.RWNode{
+				RWSet:        core.RWSet{Key: []byte(k), Value: []byte{}},
+				TransInfo:    transInfo,
+				Label:        "w",
+				ContractName: utils.ReplayContractName,
+			})
+		}
+		txToNodes[txID] = nodes
+	}
+
+	// --- Step 5: Dependency chain construction (TestVegeta Step 2) ---
+	// Build key → txIDs map, then chains, then orderedTxs.
+	startChain := time.Now()
+	keyToTxs := make(map[string][]string)
+	for txID := range speculativeRS {
+		for key := range speculativeRS[txID] {
+			keyToTxs[key] = append(keyToTxs[key], txID)
+		}
+	}
+	for txID := range speculativeWS {
+		for key := range speculativeWS[txID] {
+			keyToTxs[key] = append(keyToTxs[key], txID)
+		}
+	}
+
+	var chains [][]string
+	for _, txIDs := range keyToTxs {
+		if len(txIDs) > 0 {
+			seen := make(map[string]bool)
+			var chain []string
+			for _, id := range txIDs {
+				if !seen[id] {
+					seen[id] = true
+					chain = append(chain, id)
+				}
+			}
+			chains = append(chains, chain)
+		}
+	}
+
+	sort.Slice(chains, func(i, j int) bool {
+		return len(chains[i]) > len(chains[j])
+	})
+
+	orderedTxs := make([]string, 0, txCount)
+	seenTxs := make(map[string]bool)
+	for _, chain := range chains {
+		for _, txID := range chain {
+			if !seenTxs[txID] {
+				orderedTxs = append(orderedTxs, txID)
+				seenTxs[txID] = true
+			}
+		}
+	}
+	for _, ref := range block.Refs {
+		if !seenTxs[ref.TxHash] {
+			orderedTxs = append(orderedTxs, ref.TxHash)
+			seenTxs[ref.TxHash] = true
+		}
+	}
+
+	chainDur := time.Since(startChain)
+	writer.WriteString(fmt.Sprintf("Time of speculation (chain ordering): %v\n", chainDur))
+	writer.Flush()
+
+	// --- Step 6: Build DAG (TestVegeta Step 3) ---
+	// For each tx in orderedTxs, find predecessors by conflict detection.
+	startDAG := time.Now()
+	dag := make(map[string][]string, txCount)
+	for i, txID := range orderedTxs {
+		var predecessors []string
+		for j := 0; j < i; j++ {
+			prevTxID := orderedTxs[j]
+			hasConflict := false
+
+			// W-W conflict
+			for key := range speculativeWS[txID] {
+				if speculativeWS[prevTxID][key] {
+					hasConflict = true
+					break
+				}
+			}
+			if !hasConflict {
+				// R-W conflict (tx reads what prev writes)
+				for key := range speculativeRS[txID] {
+					if speculativeWS[prevTxID][key] {
+						hasConflict = true
+						break
+					}
+				}
+			}
+			if !hasConflict {
+				// W-R conflict (tx writes what prev reads)
+				for key := range speculativeWS[txID] {
+					if speculativeRS[prevTxID][key] {
+						hasConflict = true
+						break
+					}
+				}
+			}
+			if hasConflict {
+				predecessors = append(predecessors, prevTxID)
+			}
+		}
+		dag[txID] = predecessors
+	}
+	dagDur := time.Since(startDAG)
+	writer.WriteString(fmt.Sprintf("Time of DAG construction: %v\n", dagDur))
+	writer.Flush()
+
+	// --- Step 7: Validation loop (batch-level, TestVegeta Step 4) ---
+	// committedDelta stores ONLY the keys written by previously-committed
+	// txs (incremental overlay). The witness baseline lives in each worker's
+	// stateDB (injected once at pool init).
+	startExec := time.Now()
+	committedDelta := make(map[string]string)
+	var committedDeltaLock sync.RWMutex
+
+	executed := make(map[string]bool, txCount)
+	remaining := make(map[string]bool, txCount)
+	for _, txID := range orderedTxs {
+		remaining[txID] = true
+	}
+
+	var serialReplayList []string
+	algorithmAborted := 0
+	var noContextCount int32
+	var reexecErrorCount int32
+
+	for len(remaining) > 0 {
+		// Find ready txs (all predecessors executed).
+		var batch []string
+		for txID := range remaining {
+			ready := true
+			for _, pred := range dag[txID] {
+				if !executed[pred] {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				batch = append(batch, txID)
+			}
+		}
+
+		if len(batch) == 0 {
+			break
+		}
+
+		// Deterministic batch ordering.
+		sort.Strings(batch)
+
+		// Batch-level snapshot: all txs in this batch see the same
+		// committedDelta (witness baseline + prior committed txs' writes).
+		committedDeltaLock.RLock()
+		overlaySnapshot := cloneStringMap(committedDelta)
+		committedDeltaLock.RUnlock()
+
+		batchResults := make(map[string]bool)
+		batchWriteValues := make(map[string]map[string]string)
+		var resultsLock sync.Mutex
+		var wg sync.WaitGroup
+
+		validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
+			txID := i.(string)
+			defer wg.Done()
+
+			txIdx, ok := txIDToIdx[txID]
+			if !ok {
+				atomic.AddInt32(&noContextCount, 1)
+				resultsLock.Lock()
+				batchResults[txID] = false
+				resultsLock.Unlock()
+				return
+			}
+
+			worker, err := levmPool.Acquire()
+			if err != nil {
+				atomic.AddInt32(&reexecErrorCount, 1)
+				resultsLock.Lock()
+				batchResults[txID] = false
+				resultsLock.Unlock()
+				fmt.Printf("  TX %s: aborted (worker acquire error: %v)\n", txID, err)
+				return
+			}
+			defer levmPool.Release(worker)
+
+			result, err := worker.ReExecute(fromBlock, txIdx, overlaySnapshot)
+			if err != nil {
+				atomic.AddInt32(&reexecErrorCount, 1)
+				resultsLock.Lock()
+				batchResults[txID] = false
+				resultsLock.Unlock()
+				serialReplayList = append(serialReplayList, txID)
+				fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
+				return
+			}
+
+			// Check: real keys ⊆ speculative keys?
+			preRS := speculativeRS[txID]
+			preWS := speculativeWS[txID]
+
+			match := true
+			for _, key := range result.RealReadKeys {
+				if !preRS[key] {
+					match = false
+					break
+				}
+			}
+			if match {
+				for _, key := range result.RealWriteKeys {
+					if !preWS[key] {
+						match = false
+						break
+					}
+				}
+			}
+
+			if !match {
+				resultsLock.Lock()
+				batchResults[txID] = false
+				resultsLock.Unlock()
+				serialReplayList = append(serialReplayList, txID)
+				fmt.Printf("  TX %s: aborted (real keys exceed conservative) - real=%d, conservative=%d\n",
+					txID, len(result.RealReadKeys)+len(result.RealWriteKeys),
+					len(preRS)+len(preWS))
+				return
+			}
+
+			resultsLock.Lock()
+			batchResults[txID] = true
+			batchWriteValues[txID] = result.WriteValues
+			resultsLock.Unlock()
+		})
+
+		for _, txID := range batch {
+			wg.Add(1)
+			_ = validatePool.Invoke(txID)
+		}
+		wg.Wait()
+		validatePool.Release()
+
+		// Merge successful txs' WriteValues into committedDelta.
+		// Failed txs are removed from remaining but NOT merged — they
+		// will be replayed serially in Step 8.
+		for _, txID := range batch {
+			delete(remaining, txID)
+			executed[txID] = true
+			if batchResults[txID] {
+				committedDeltaLock.Lock()
+				for k, v := range batchWriteValues[txID] {
+					committedDelta[k] = v
+				}
+				committedDeltaLock.Unlock()
+			} else {
+				algorithmAborted++
+			}
+		}
+	}
+
+	execDur := time.Since(startExec)
+	writer.WriteString(fmt.Sprintf("Time of replay (validation): %v\n", execDur))
+
+	// --- Step 8: Serial replay of aborted txs (sorted by TxID) ---
+	// Mirrors TestVegeta Step 5: aborted txs execute serially with state
+	// ACCUMULATING between txs (ReExecuteCommit → PreExecuteCommit).
+	//
+	// Uses a dedicated levm from the pool (the validation loop is done).
+	startSerial := time.Now()
+	sort.Strings(serialReplayList)
+	serialReplayed := 0
+
+	serialReplayer, err := levmPool.Acquire()
+	if err != nil {
+		return fmt.Errorf("levmPool.Acquire (serial replay): %w", err)
+	}
+	defer levmPool.Release(serialReplayer)
+
+	// First tx: apply committedDelta overlay via ReExecuteCommit.
+	// Subsequent txs: PreExecuteCommit (stateDB already carries accumulated writes).
+	var firstDone bool
+	for _, txID := range serialReplayList {
+		txIdx, ok := txIDToIdx[txID]
+		if !ok {
+			continue
+		}
+
+		if !firstDone {
+			committedDeltaLock.RLock()
+			override := cloneStringMap(committedDelta)
+			committedDeltaLock.RUnlock()
+
+			result, err := serialReplayer.ReExecuteCommit(fromBlock, txIdx, override)
+			if err != nil {
+				fmt.Printf("  TX %s: serial replay failed (%v)\n", txID, err)
+				firstDone = true
+				serialReplayed++
+				continue
+			}
+			if result != nil {
+				committedDeltaLock.Lock()
+				for k, v := range result.WriteValues {
+					committedDelta[k] = v
+				}
+				committedDeltaLock.Unlock()
+			}
+			firstDone = true
+		} else {
+			if _, err := serialReplayer.PreExecuteCommit(fromBlock, txIdx); err != nil {
+				fmt.Printf("  TX %s: serial replay failed (%v)\n", txID, err)
+			}
+		}
+		serialReplayed++
+	}
+	serialDur := time.Since(startSerial)
+	writer.WriteString(fmt.Sprintf("Time of serial replay: %v\n", serialDur))
+	writer.WriteString(fmt.Sprintf("Serial replayed: %d\n", serialReplayed))
+
+	writer.WriteString(fmt.Sprintf("Time of validation and execution: %v\n", time.Since(startExec)))
+
+	// --- Step 9: Baseline serial execution + report ---
+	// Mirrors Depurge's baseline: fresh levm, serial PreExecuteCommit for
+	// every tx, measures Vegeta's speedup vs pure serial.
+	vegetaDur := preAnalysisDur + execDur + serialDur + dagDur
+
+	serialBaseline, err := utils.NewLevmSpecFallback(ds, fromBlock, toBlock)
+	if err != nil {
+		return fmt.Errorf("NewLevmSpecFallback (serial baseline): %w", err)
+	}
+	defer serialBaseline.Close()
+
+	startBaseline := time.Now()
+	serialOK, serialFail := 0, 0
+	for txIdx := 0; txIdx < txCount; txIdx++ {
+		rw, err := serialBaseline.PreExecuteCommit(fromBlock, txIdx)
+		if err != nil || rw == nil || !rw.Success {
+			serialFail++
+			continue
+		}
+		serialOK++
+	}
+	serialBaselineDur := time.Since(startBaseline)
+
+	writer.WriteString(fmt.Sprintf("===================================================\n"))
+	writer.WriteString(fmt.Sprintf("Baseline: serial execution of all %d txs (commit between txs)\n", txCount))
+	writer.WriteString(fmt.Sprintf("Time of serial execution: %v (ok=%d, fail=%d)\n",
+		serialBaselineDur, serialOK, serialFail))
+	writer.WriteString(fmt.Sprintf("Algorithm aborted (total): %d\n", algorithmAborted))
+	writer.WriteString(fmt.Sprintf("  - context not found: %d\n", atomic.LoadInt32(&noContextCount)))
+	writer.WriteString(fmt.Sprintf("  - re-execution error: %d\n", atomic.LoadInt32(&reexecErrorCount)))
+	writer.WriteString(fmt.Sprintf("  - key exceed (serial replayed): %d\n", serialReplayed))
+	if txCount > 0 {
+		writer.WriteString(fmt.Sprintf("Abort rate: %.3f\n",
+			float64(algorithmAborted)/float64(txCount)))
+	}
+	writer.WriteString(fmt.Sprintf("Time of processing TXs on Vegeta: %v\n", vegetaDur))
+	if serialBaselineDur > 0 {
+		writer.WriteString(fmt.Sprintf("Speedup (serial / Vegeta): %.2fx\n",
+			float64(serialBaselineDur)/float64(vegetaDur)))
 	}
 	writer.WriteString(fmt.Sprintf("===================================================\n"))
 	writer.Flush()
@@ -1118,6 +1713,25 @@ func cloneStringMap(m map[string]string) map[string]string {
 	out := make(map[string]string, len(m))
 	for k, v := range m {
 		out[k] = v
+	}
+	return out
+}
+
+// filterOverlayByKeys copies only the entries of m whose key is in allowed.
+// Returns nil when nothing matches so ReExecute skips applyStateOverride
+// entirely (its overlay == nil check).
+func filterOverlayByKeys(m map[string]string, allowed map[string]bool) map[string]string {
+	if len(m) == 0 || len(allowed) == 0 {
+		return nil
+	}
+	var out map[string]string
+	for k, v := range m {
+		if allowed[k] {
+			if out == nil {
+				out = make(map[string]string, len(allowed))
+			}
+			out[k] = v
+		}
 	}
 	return out
 }

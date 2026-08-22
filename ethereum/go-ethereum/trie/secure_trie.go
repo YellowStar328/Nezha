@@ -18,6 +18,7 @@ package trie
 
 import (
 	"fmt"
+	"sync"
 
 	"Nezha/ethereum/go-ethereum/common"
 	"Nezha/ethereum/go-ethereum/log"
@@ -32,12 +33,18 @@ import (
 // New and must have an attached database. The database also stores
 // the preimage of each key.
 //
-// SecureTrie is not safe for concurrent use.
+// A SecureTrie is safe for concurrent use: all access methods take an
+// internal RWMutex that guards both the shared hashKeyBuf scratch buffer
+// and the secKeyCache map. This allows a single SecureTrie instance to be
+// shared across multiple StateDBs used by concurrent workers (e.g. the
+// shared-trie replay pool), which is what Vegeta relies on.
 type SecureTrie struct {
 	trie             Trie
 	hashKeyBuf       [common.HashLength]byte
 	secKeyCache      map[string][]byte
 	secKeyCacheOwner *SecureTrie // Pointer to self, replace the key cache on mismatch
+
+	lock sync.RWMutex // guards hashKeyBuf and secKeyCache
 }
 
 // NewSecure creates a trie with an existing root node from a backing database
@@ -76,6 +83,8 @@ func (t *SecureTrie) Get(key []byte) []byte {
 // The value bytes must not be modified by the caller.
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryGet(key []byte) ([]byte, error) {
+	t.lock.RLock()
+	defer t.lock.RUnlock()
 	return t.trie.TryGet(t.hashKey(key))
 }
 
@@ -100,6 +109,8 @@ func (t *SecureTrie) Update(key, value []byte) {
 //
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryUpdate(key, value []byte) error {
+	t.lock.Lock()
+	defer t.lock.Unlock()
 	hk := t.hashKey(key)
 	err := t.trie.TryUpdate(hk, value)
 	if err != nil {
@@ -119,6 +130,8 @@ func (t *SecureTrie) Delete(key []byte) {
 // TryDelete removes any existing value for key from the trie.
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryDelete(key []byte) error {
+	t.lock.Lock()
+	defer t.lock.Unlock()
 	hk := t.hashKey(key)
 	delete(t.getSecKeyCache(), string(hk))
 	return t.trie.TryDelete(hk)
@@ -127,10 +140,13 @@ func (t *SecureTrie) TryDelete(key []byte) error {
 // GetKey returns the sha3 preimage of a hashed key that was
 // previously used to store a value.
 func (t *SecureTrie) GetKey(shaKey []byte) []byte {
-	if key, ok := t.getSecKeyCache()[string(shaKey)]; ok {
+	t.lock.RLock()
+	key, ok := t.getSecKeyCache()[string(shaKey)]
+	t.lock.RUnlock()
+	if ok {
 		return key
 	}
-	key, _ := t.trie.db.preimage(common.BytesToHash(shaKey))
+	key, _ = t.trie.db.preimage(common.BytesToHash(shaKey))
 	return key
 }
 
@@ -140,6 +156,8 @@ func (t *SecureTrie) GetKey(shaKey []byte) []byte {
 // Committing flushes nodes from memory. Subsequent Get calls will load nodes
 // from the database.
 func (t *SecureTrie) Commit(onleaf LeafCallback) (root common.Hash, err error) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
 	// Write all the pre-images to the actual disk database
 	if len(t.getSecKeyCache()) > 0 {
 		t.trie.db.lock.Lock()
@@ -163,6 +181,7 @@ func (t *SecureTrie) Hash() common.Hash {
 // Copy returns a copy of SecureTrie.
 func (t *SecureTrie) Copy() *SecureTrie {
 	cpy := *t
+	cpy.lock = sync.RWMutex{}
 	return &cpy
 }
 

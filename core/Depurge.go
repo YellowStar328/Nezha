@@ -8,16 +8,24 @@ import (
 
 type TransactionQueue struct {
 	queue *list.List
+	// index maps txID → its *list.Element so contains/remove are O(1) instead
+	// of linear scans. Kept strictly in sync: set on push, deleted on pop/remove.
+	index map[string]*list.Element
 }
 
 func newTransactionQueue() *TransactionQueue {
 	return &TransactionQueue{
 		queue: list.New(),
+		index: make(map[string]*list.Element),
 	}
 }
 
 func (q *TransactionQueue) push(txID string) {
-	q.queue.PushBack(txID)
+	if _, ok := q.index[txID]; ok {
+		return // already queued — defensive dedup (see addTransaction)
+	}
+	elem := q.queue.PushBack(txID)
+	q.index[txID] = elem
 }
 
 func (q *TransactionQueue) pop() string {
@@ -25,8 +33,10 @@ func (q *TransactionQueue) pop() string {
 	if elem == nil {
 		return ""
 	}
+	txID := elem.Value.(string)
 	q.queue.Remove(elem)
-	return elem.Value.(string)
+	delete(q.index, txID)
+	return txID
 }
 
 func (q *TransactionQueue) front() string {
@@ -46,22 +56,18 @@ func (q *TransactionQueue) len() int {
 }
 
 func (q *TransactionQueue) contains(txID string) bool {
-	for elem := q.queue.Front(); elem != nil; elem = elem.Next() {
-		if elem.Value.(string) == txID {
-			return true
-		}
-	}
-	return false
+	_, ok := q.index[txID]
+	return ok
 }
 
 func (q *TransactionQueue) remove(txID string) bool {
-	for elem := q.queue.Front(); elem != nil; elem = elem.Next() {
-		if elem.Value.(string) == txID {
-			q.queue.Remove(elem)
-			return true
-		}
+	elem, ok := q.index[txID]
+	if !ok {
+		return false
 	}
-	return false
+	q.queue.Remove(elem)
+	delete(q.index, txID)
+	return true
 }
 
 // DepurgeScheduler schedules transactions based on conservative key dependencies.
@@ -111,6 +117,17 @@ func NewDepurgeScheduler() *DepurgeScheduler {
 }
 
 func (ds *DepurgeScheduler) addTransaction(txID string, keys []string) {
+	// Deduplicate keys: a duplicate key would push txID twice into the same
+	// queue, corrupting TransactionQueue.index and the front-release logic.
+	seen := make(map[string]bool, len(keys))
+	uniq := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if !seen[k] {
+			seen[k] = true
+			uniq = append(uniq, k)
+		}
+	}
+	keys = uniq
 	sort.Strings(keys)
 	ds.txKeyMap[txID] = keys
 	ds.txExecuted[txID] = false

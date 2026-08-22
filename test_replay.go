@@ -333,11 +333,11 @@ func runReplayDepurgeMode(
 				abortCountLock.Lock()
 				validationAborted++
 				abortCountLock.Unlock()
-				scheduler.Abort(txID)
-				serialReplayLock.Lock()
-				serialReplayList = append(serialReplayList, txID)
-				serialReplayLock.Unlock()
-				fmt.Printf("  TX %s: aborted (worker acquire error: %v)\n", txID, err)
+			scheduler.Abort(txID)
+			serialReplayLock.Lock()
+			serialReplayList = append(serialReplayList, txID)
+			serialReplayLock.Unlock()
+			fmt.Printf("  TX %s: aborted (worker acquire error: %v)\n", txID, err)
 				return
 			}
 			defer levmPool.Release(worker)
@@ -348,13 +348,13 @@ func runReplayDepurgeMode(
 				abortCountLock.Lock()
 				validationAborted++
 				abortCountLock.Unlock()
-				scheduler.Abort(txID)
-				// Per project memory: reexec-fail aborts must also be added to
-				// serialReplayList (+ descendants) to maintain state consistency.
-				serialReplayLock.Lock()
-				serialReplayList = append(serialReplayList, txID)
-				serialReplayLock.Unlock()
-				fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
+			scheduler.Abort(txID)
+			// Per project memory: reexec-fail aborts must also be added to
+			// serialReplayList (+ descendants) to maintain state consistency.
+			serialReplayLock.Lock()
+			serialReplayList = append(serialReplayList, txID)
+			serialReplayLock.Unlock()
+			fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
 				return
 			}
 
@@ -403,14 +403,14 @@ func runReplayDepurgeMode(
 						dumpAbortKeyDiff(txID, txIdx, isLLM, conservativeKeys, conservativeKeySet, realKeySet)
 					})
 				}
-				abortCountLock.Lock()
-				validationAborted++
-				abortCountLock.Unlock()
-				scheduler.Abort(txID)
-				serialReplayLock.Lock()
-				serialReplayList = append(serialReplayList, txID)
-				serialReplayLock.Unlock()
-				var missing []string
+			abortCountLock.Lock()
+			validationAborted++
+			abortCountLock.Unlock()
+			scheduler.Abort(txID)
+			serialReplayLock.Lock()
+			serialReplayList = append(serialReplayList, txID)
+			serialReplayLock.Unlock()
+			var missing []string
 				for k := range realKeySet {
 					if !conservativeKeySet[k] {
 						missing = append(missing, k)
@@ -901,11 +901,17 @@ func runReplayVegetaMode(
 	// Trie on a shared on-disk leveldb; every worker reads through its own
 	// fresh (empty-cache) StateDB, so node loads miss the trie cache and hit
 	// the disk (genuine cold reads, no simulation).
+	//
+	// With --disk-trie the pool additionally follows the vegeta-upstream
+	// shared layout: all workers' StateDBs view ONE exact trie instance over
+	// the shared trie database. The validation loop keeps each worker across
+	// batches (state accumulates in the shared trie, no overlay snapshots),
+	// and aborted txs are replayed last on worker[0] (copyStateDB[0]).
 	var levmPool *utils.LevmSpecFallbackPool
 	if trieDisk {
-		levmPool, err = utils.NewLevmSpecFallbackPoolTrie(ds, fromBlock, toBlock, 0, trieCacheMB)
+		levmPool, err = utils.NewLevmSpecFallbackPoolSharedTrie(ds, fromBlock, toBlock, 0, trieCacheMB)
 		if err != nil {
-			return fmt.Errorf("NewLevmSpecFallbackPoolTrie: %w", err)
+			return fmt.Errorf("NewLevmSpecFallbackPoolSharedTrie: %w", err)
 		}
 	} else {
 		levmPool, err = utils.NewLevmSpecFallbackPool(ds, fromBlock, toBlock, 0)
@@ -1054,8 +1060,30 @@ func runReplayVegetaMode(
 	algorithmAborted := 0
 	var noContextCount int32
 	var reexecErrorCount int32
+	var failedNotAborted int32 // failed txs committed directly (nonce-only, upstream semantics), not replayed serially
 	committedDelta := make(map[string]string)
 	var committedDeltaLock sync.RWMutex
+
+	// Shared-trie mode (--disk-trie): pin every pool worker for the whole
+	// validation + serial-replay phase — the vegeta-upstream layout keeps one
+	// StateDB per worker, accumulating state across batches on the shared trie
+	// instance. Acquired after PreExecuteBatch so the pool is fully idle.
+	// worker[0] plays the role of copyStateDB[0] (final serial replay).
+	var sharedWorkers []*utils.LevmSpecFallback
+	if trieDisk {
+		sharedWorkers = make([]*utils.LevmSpecFallback, levmPool.NumWorkers())
+		for i := range sharedWorkers {
+			sharedWorkers[i], err = levmPool.Acquire()
+			if err != nil {
+				return fmt.Errorf("acquire shared-trie worker %d: %w", i, err)
+			}
+		}
+		defer func() {
+			for _, w := range sharedWorkers {
+				levmPool.Release(w)
+			}
+		}()
+	}
 
 	for start := 0; start < txCount; start += blockSize {
 		end := start + blockSize
@@ -1196,133 +1224,283 @@ func runReplayVegetaMode(
 			remaining[txID] = true
 		}
 
-		for len(remaining) > 0 {
-			// Find ready txs (all predecessors executed).
-			var batch []string
-			for txID := range remaining {
-				ready := true
-				for _, pred := range dag[txID] {
-					if !executed[pred] {
-						ready = false
-						break
+		if trieDisk {
+			// ===== Shared-trie mode: vegeta-upstream layout =====
+			// Every worker keeps its accumulating StateDB, all viewing the
+			// ONE shared trie instance (no Acquire/Release per tx, no overlay
+			// snapshots). Each tx starts from a ResetObjectCache (so it reads
+			// the latest shared state), runs with ReExecuteCommit (state
+			// ACCUMULATES, never reverts to the witness base), and on success
+			// IntermediateShared writes the account into the shared trie
+			// instance + flushes storage nodes into the shared trie database,
+			// making the write visible to every worker. Txs whose real keys
+			// exceed the conservative set are reverted and queued for the
+			// final serial replay on worker[0] (copyStateDB[0] equivalent).
+			for len(remaining) > 0 {
+				// Find ready txs (all predecessors executed).
+				var batch []string
+				for txID := range remaining {
+					ready := true
+					for _, pred := range dag[txID] {
+						if !executed[pred] {
+							ready = false
+							break
+						}
+					}
+					if ready {
+						batch = append(batch, txID)
 					}
 				}
-				if ready {
-					batch = append(batch, txID)
-				}
-			}
 
-			if len(batch) == 0 {
-				break
-			}
-
-			// Deterministic batch ordering.
-			sort.Strings(batch)
-
-			// Batch-level snapshot: all txs in this batch see the same
-			// committedDelta (witness baseline + prior committed txs' writes).
-			committedDeltaLock.RLock()
-			overlaySnapshot := cloneStringMap(committedDelta)
-			committedDeltaLock.RUnlock()
-
-			batchResults := make(map[string]bool)
-			batchWriteValues := make(map[string]map[string]string)
-			var resultsLock sync.Mutex
-			var wg sync.WaitGroup
-
-			validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
-				txID := i.(string)
-				defer wg.Done()
-
-				txIdx, ok := txIDToIdx[txID]
-				if !ok {
-					atomic.AddInt32(&noContextCount, 1)
-					resultsLock.Lock()
-					batchResults[txID] = false
-					resultsLock.Unlock()
-					return
+				if len(batch) == 0 {
+					break
 				}
 
-				worker, err := levmPool.Acquire()
-				if err != nil {
-					atomic.AddInt32(&reexecErrorCount, 1)
-					resultsLock.Lock()
-					batchResults[txID] = false
-					resultsLock.Unlock()
-					fmt.Printf("  TX %s: aborted (worker acquire error: %v)\n", txID, err)
-					return
+				// Deterministic batch ordering.
+				sort.Strings(batch)
+
+				batchResults := make(map[string]bool)
+				var resultsLock sync.Mutex
+				var wg sync.WaitGroup
+
+				txC := make(chan string)
+				for _, worker := range sharedWorkers {
+					wg.Add(1)
+					go func(w *utils.LevmSpecFallback) {
+						defer wg.Done()
+						for txID := range txC {
+							txIdx, ok := txIDToIdx[txID]
+							if !ok {
+								atomic.AddInt32(&noContextCount, 1)
+								resultsLock.Lock()
+								batchResults[txID] = false
+								resultsLock.Unlock()
+								continue
+							}
+							// Start every tx from the latest shared state:
+							// drop this worker's cached objects, then snapshot
+							// the (empty) journal so a conflicting tx can be
+							// reverted without touching the shared trie.
+							w.ResetObjectCache()
+							snap := w.GetStateDB().Snapshot()
+
+							result, err := w.ReExecuteCommit(fromBlock, txIdx, nil)
+							// Aligned with upstream ReplayAndReexecute: a failing
+							// tx is NOT aborted. geth's TransitionDb already
+							// reverted the EVM writes and kept only the sender's
+							// nonce bump, so a hard error (intrinsic gas /
+							// insufficient balance) leaves an EMPTY real R/W set
+							// that trivially matches the conservative set below,
+							// and IntermediateShared then flushes the nonce bump
+							// into the shared trie (chain semantics: failed txs
+							// still consume their sender's nonce). No serial
+							// replay is needed for these.
+							if err != nil {
+								atomic.AddInt32(&failedNotAborted, 1)
+							}
+
+							// Check: real keys ⊆ speculative keys?
+							preRS := blockRS[txID]
+							preWS := blockWS[txID]
+
+							match := true
+							for _, key := range result.RealReadKeys {
+								if !preRS[key] {
+									match = false
+									break
+								}
+							}
+							if match {
+								for _, key := range result.RealWriteKeys {
+									if !preWS[key] {
+										match = false
+										break
+									}
+								}
+							}
+
+							if !match {
+								// Discard this tx's writes: the shared trie
+								// must only see committed (non-conflicting)
+								// txs. Revert the journal snapshot.
+								w.GetStateDB().RevertToSnapshot(snap)
+								resultsLock.Lock()
+								batchResults[txID] = false
+								serialReplayList = append(serialReplayList, txID)
+								resultsLock.Unlock()
+								fmt.Printf("  TX %s: aborted (real keys exceed conservative) - real=%d, conservative=%d\n",
+									txID, len(result.RealReadKeys)+len(result.RealWriteKeys),
+									len(preRS)+len(preWS))
+								continue
+							}
+
+							// Success: flush into the shared trie so every
+							// other worker sees this tx's writes (account trie
+							// instance + storage nodes in the shared trieDB).
+							if _, ierr := w.IntermediateShared(); ierr != nil {
+								atomic.AddInt32(&reexecErrorCount, 1)
+								w.GetStateDB().RevertToSnapshot(snap)
+								resultsLock.Lock()
+								batchResults[txID] = false
+								serialReplayList = append(serialReplayList, txID)
+								resultsLock.Unlock()
+								fmt.Printf("  TX %s: aborted (shared-trie flush error: %v)\n", txID, ierr)
+								continue
+							}
+							resultsLock.Lock()
+							batchResults[txID] = true
+							resultsLock.Unlock()
+						}
+					}(worker)
 				}
-				defer levmPool.Release(worker)
 
-				result, err := worker.ReExecute(fromBlock, txIdx, overlaySnapshot)
-				if err != nil {
-					atomic.AddInt32(&reexecErrorCount, 1)
-					resultsLock.Lock()
-					batchResults[txID] = false
-					resultsLock.Unlock()
-					serialReplayList = append(serialReplayList, txID)
-					fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
-					return
+				for _, txID := range batch {
+					txC <- txID
 				}
+				close(txC)
+				wg.Wait()
 
-				// Check: real keys ⊆ speculative keys?
-				preRS := blockRS[txID]
-				preWS := blockWS[txID]
-
-				match := true
-				for _, key := range result.RealReadKeys {
-					if !preRS[key] {
-						match = false
-						break
+				// No overlay merge: the shared trie already carries every
+				// successful write. Failed txs queue for the final serial
+				// replay (Step 8) on worker[0].
+				for _, txID := range batch {
+					delete(remaining, txID)
+					executed[txID] = true
+					if !batchResults[txID] {
+						algorithmAborted++
 					}
 				}
-				if match {
-					for _, key := range result.RealWriteKeys {
-						if !preWS[key] {
+			}
+		} else {
+			// ===== Overlay mode (existing behavior, untouched) =====
+			for len(remaining) > 0 {
+				// Find ready txs (all predecessors executed).
+				var batch []string
+				for txID := range remaining {
+					ready := true
+					for _, pred := range dag[txID] {
+						if !executed[pred] {
+							ready = false
+							break
+						}
+					}
+					if ready {
+						batch = append(batch, txID)
+					}
+				}
+
+				if len(batch) == 0 {
+					break
+				}
+
+				// Deterministic batch ordering.
+				sort.Strings(batch)
+
+				// Batch-level snapshot: all txs in this batch see the same
+				// committedDelta (witness baseline + prior committed txs' writes).
+				committedDeltaLock.RLock()
+				overlaySnapshot := cloneStringMap(committedDelta)
+				committedDeltaLock.RUnlock()
+
+				batchResults := make(map[string]bool)
+				batchWriteValues := make(map[string]map[string]string)
+				var resultsLock sync.Mutex
+				var wg sync.WaitGroup
+
+				validatePool, _ := ants.NewPoolWithFunc(runtime.NumCPU(), func(i interface{}) {
+					txID := i.(string)
+					defer wg.Done()
+
+					txIdx, ok := txIDToIdx[txID]
+					if !ok {
+						atomic.AddInt32(&noContextCount, 1)
+						resultsLock.Lock()
+						batchResults[txID] = false
+						resultsLock.Unlock()
+						return
+					}
+
+					worker, err := levmPool.Acquire()
+					if err != nil {
+						atomic.AddInt32(&reexecErrorCount, 1)
+						resultsLock.Lock()
+						batchResults[txID] = false
+						resultsLock.Unlock()
+						fmt.Printf("  TX %s: aborted (worker acquire error: %v)\n", txID, err)
+						return
+					}
+					defer levmPool.Release(worker)
+
+					result, err := worker.ReExecute(fromBlock, txIdx, overlaySnapshot)
+					if err != nil {
+						atomic.AddInt32(&reexecErrorCount, 1)
+						resultsLock.Lock()
+						batchResults[txID] = false
+						resultsLock.Unlock()
+						serialReplayList = append(serialReplayList, txID)
+						fmt.Printf("  TX %s: aborted (re-execution error: %v)\n", txID, err)
+						return
+					}
+
+					// Check: real keys ⊆ speculative keys?
+					preRS := blockRS[txID]
+					preWS := blockWS[txID]
+
+					match := true
+					for _, key := range result.RealReadKeys {
+						if !preRS[key] {
 							match = false
 							break
 						}
 					}
-				}
-
-				if !match {
-					resultsLock.Lock()
-					batchResults[txID] = false
-					resultsLock.Unlock()
-					serialReplayList = append(serialReplayList, txID)
-					fmt.Printf("  TX %s: aborted (real keys exceed conservative) - real=%d, conservative=%d\n",
-						txID, len(result.RealReadKeys)+len(result.RealWriteKeys),
-						len(preRS)+len(preWS))
-					return
-				}
-
-				resultsLock.Lock()
-				batchResults[txID] = true
-				batchWriteValues[txID] = result.WriteValues
-				resultsLock.Unlock()
-			})
-
-			for _, txID := range batch {
-				wg.Add(1)
-				_ = validatePool.Invoke(txID)
-			}
-			wg.Wait()
-			validatePool.Release()
-
-			// Merge successful txs' WriteValues into committedDelta.
-			// Failed txs are removed from remaining but NOT merged — they
-			// will be replayed serially in Step 8.
-			for _, txID := range batch {
-				delete(remaining, txID)
-				executed[txID] = true
-				if batchResults[txID] {
-					committedDeltaLock.Lock()
-					for k, v := range batchWriteValues[txID] {
-						committedDelta[k] = v
+					if match {
+						for _, key := range result.RealWriteKeys {
+							if !preWS[key] {
+								match = false
+								break
+							}
+						}
 					}
-					committedDeltaLock.Unlock()
-				} else {
-					algorithmAborted++
+
+					if !match {
+						resultsLock.Lock()
+						batchResults[txID] = false
+						resultsLock.Unlock()
+						serialReplayList = append(serialReplayList, txID)
+						fmt.Printf("  TX %s: aborted (real keys exceed conservative) - real=%d, conservative=%d\n",
+							txID, len(result.RealReadKeys)+len(result.RealWriteKeys),
+							len(preRS)+len(preWS))
+						return
+					}
+
+					resultsLock.Lock()
+					batchResults[txID] = true
+					batchWriteValues[txID] = result.WriteValues
+					resultsLock.Unlock()
+				})
+
+				for _, txID := range batch {
+					wg.Add(1)
+					_ = validatePool.Invoke(txID)
+				}
+				wg.Wait()
+				validatePool.Release()
+
+				// Merge successful txs' WriteValues into committedDelta.
+				// Failed txs are removed from remaining but NOT merged — they
+				// will be replayed serially in Step 8.
+				for _, txID := range batch {
+					delete(remaining, txID)
+					executed[txID] = true
+					if batchResults[txID] {
+						committedDeltaLock.Lock()
+						for k, v := range batchWriteValues[txID] {
+							committedDelta[k] = v
+						}
+						committedDeltaLock.Unlock()
+					} else {
+						algorithmAborted++
+					}
 				}
 			}
 		}
@@ -1365,11 +1543,20 @@ func runReplayVegetaMode(
 	if len(serialReplayList) > 0 {
 		switch {
 		case trieDisk:
-			serialReplayer, err = levmPool.NewSerialWorker()
-			if err != nil {
-				return fmt.Errorf("NewSerialWorker (serial replay): %w", err)
+			// Shared-trie mode: replay on worker[0] — the copyStateDB[0]
+			// equivalent. The shared trie already carries every committed
+			// write, so the replayer ACCUMULATES on the same shared instance
+			// (no fresh serial worker, no re-injected overlay). Released
+			// together with the pinned sharedWorkers at function exit.
+			if len(sharedWorkers) > 0 {
+				serialReplayer = sharedWorkers[0]
+			} else {
+				serialReplayer, err = levmPool.NewSerialWorker()
+				if err != nil {
+					return fmt.Errorf("NewSerialWorker (serial replay): %w", err)
+				}
+				defer serialReplayer.Close()
 			}
-			defer serialReplayer.Close()
 		case diskCommit:
 			serialReplayer, err = utils.NewLevmSpecFallbackDisk(ds, fromBlock, toBlock)
 			if err != nil {
@@ -1383,6 +1570,12 @@ func runReplayVegetaMode(
 			}
 			defer levmPool.Release(serialReplayer)
 		}
+	}
+	// Shared-trie mode: worker[0] may carry stale cached objects from the
+	// validation loop — reset once so the serial replay starts from the latest
+	// shared trie state.
+	if trieDisk && serialReplayer != nil {
+		serialReplayer.ResetObjectCache()
 	}
 	startSerial := time.Now()
 
@@ -1544,6 +1737,7 @@ func runReplayVegetaMode(
 	writer.WriteString(fmt.Sprintf("Algorithm aborted (total): %d\n", algorithmAborted))
 	writer.WriteString(fmt.Sprintf("  - context not found: %d\n", atomic.LoadInt32(&noContextCount)))
 	writer.WriteString(fmt.Sprintf("  - re-execution error: %d\n", atomic.LoadInt32(&reexecErrorCount)))
+	writer.WriteString(fmt.Sprintf("  - failed txs (committed, nonce-only): %d\n", atomic.LoadInt32(&failedNotAborted)))
 	writer.WriteString(fmt.Sprintf("  - key exceed (serial replayed): %d\n", serialReplayed))
 	if txCount > 0 {
 		writer.WriteString(fmt.Sprintf("Abort rate: %.3f\n",
@@ -1577,8 +1771,12 @@ func filterOverlayByKeys(m map[string]string, allowed map[string]bool) map[strin
 		return nil
 	}
 	var out map[string]string
-	for k, v := range m {
-		if allowed[k] {
+	// Iterate the smaller side: a tx's conservative set (allowed) is typically
+	// a handful of keys while committedDelta (m) grows to dozens/hundreds, so
+	// walking allowed and probing m is O(|allowed|) instead of O(|m|). Result
+	// is identical (same intersection); map order is irrelevant.
+	for k := range allowed {
+		if v, ok := m[k]; ok {
 			if out == nil {
 				out = make(map[string]string, len(allowed))
 			}

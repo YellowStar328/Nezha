@@ -78,3 +78,25 @@ func NewStateDBWithSharedTrie(root common.Hash, db state.Database) *state.StateD
 	com.PanicErr(err)
 	return stateDB
 }
+
+// NewStateDBsWithSharedTrie creates n StateDBs that share ONE exact trie
+// instance (opened once from root) in addition to the shared state.Database.
+// Because the trie instance itself is shared, writes flushed by one StateDB
+// via IntermediateRoot / CommitDirtyStorage are visible to all others without
+// any root propagation — the vegeta upstream "copyStateDB []*StateDB all view
+// the same Trie" layout. Callers must use the resulting StateDBs concurrently
+// only through lock-guarded trie access (trie.Trie is lock-protected).
+func NewStateDBsWithSharedTrie(root common.Hash, db state.Database, n int) ([]*state.StateDB, error) {
+	tr, err := db.OpenTrie(root)
+	if err != nil {
+		return nil, err
+	}
+	sdbs := make([]*state.StateDB, n)
+	for i := 0; i < n; i++ {
+		sdbs[i], err = state.NewWithTrie(db, tr)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return sdbs, nil
+}

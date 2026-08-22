@@ -123,6 +123,27 @@ func New(root common.Hash, db Database) (*StateDB, error) {
 	}, nil
 }
 
+// NewWithTrie creates a StateDB over a caller-supplied trie instance instead
+// of opening a fresh one. Multiple StateDBs created from the same trie share
+// that exact trie: writes flushed through IntermediateRoot (and storage
+// commits via CommitDirtyStorage) are immediately visible to every holder.
+// This is the "shared TrieDB" access form used by the vegeta upstream-style
+// replay worker pool. The trie instance must not be shared across StateDBs
+// that are used concurrently unless the trie itself is safe for concurrent
+// use (see trie.Trie, which is lock-guarded).
+func NewWithTrie(db Database, trie Trie) (*StateDB, error) {
+	return &StateDB{
+		db:                  db,
+		trie:                trie,
+		stateObjects:        make(map[common.Address]*stateObject),
+		stateObjectsPending: make(map[common.Address]struct{}),
+		stateObjectsDirty:   make(map[common.Address]struct{}),
+		logs:                make(map[common.Hash][]*types.Log),
+		preimages:           make(map[common.Hash][]byte),
+		journal:             newJournal(),
+	}, nil
+}
+
 // setError remembers the first non-nil error it is called with.
 func (s *StateDB) setError(err error) {
 	if s.dbErr == nil {
@@ -153,6 +174,18 @@ func (s *StateDB) Reset(root common.Hash) error {
 	s.preimages = make(map[common.Hash][]byte)
 	s.clearJournalAndRefund()
 	return nil
+}
+
+// ResetObjectCache drops every cached state object so the next lookup reads
+// the current trie state. It is used by shared-trie (vegeta upstream-style)
+// workers between txs: because the trie instance is shared, a cache reset
+// makes the worker re-read the latest writes committed by all other workers
+// without rebuilding the StateDB itself. The journal is left untouched so the
+// caller can still RevertToSnapshot across the reset boundary.
+func (s *StateDB) ResetObjectCache() {
+	s.stateObjects = make(map[common.Address]*stateObject)
+	s.stateObjectsPending = make(map[common.Address]struct{})
+	s.stateObjectsDirty = make(map[common.Address]struct{})
 }
 
 func (s *StateDB) AddLog(log *types.Log) {
@@ -706,6 +739,61 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 		defer func(start time.Time) { s.AccountHashes += time.Since(start) }(time.Now())
 	}
 	return s.trie.Hash()
+}
+
+// CommitDirtyStorage flushes the storage tries of every dirty state object
+// into the shared trie database (in-memory node cache). Unlike Commit it does
+// NOT hash or commit the account trie and does not touch the journal, so it is
+// cheap enough to run after every tx in the shared-trie replay pool. This is
+// what makes storage written by one worker readable by the others: the account
+// trie is shared as a single trie instance, but each stateObject owns a private
+// storage trie whose nodes must land in the shared trie database.
+func (s *StateDB) CommitDirtyStorage() error {
+	if len(s.stateObjectsDirty) == 0 {
+		return nil
+	}
+	for addr := range s.stateObjectsDirty {
+		obj := s.stateObjects[addr]
+		if obj.deleted {
+			continue
+		}
+		if err := obj.CommitTrie(s.db); err != nil {
+			return err
+		}
+	}
+	s.stateObjectsDirty = make(map[common.Address]struct{})
+	return nil
+}
+
+// IntermediateShared_Re flushes the current tx's writes into the shared trie,
+// aligned with the vegeta-upstream IntermediateRoot_Re: finalise, then write
+// every pending account into the shared account-trie instance.
+//
+// Unlike IntermediateRoot it does NOT recompute the whole account-trie hash
+// (s.trie.Hash()) on every tx — upstream's IntermediateRoot_Re has no such
+// hash either, and the root is only needed once at the end of the block.
+// The per-object updateRoot() hashing is also skipped: CommitDirtyStorage's
+// trie.Commit already hashes each dirty object's storage trie once AND updates
+// its storageRoot (stateObject.CommitTrie sets s.data.Root), so the duplicate
+// storage hashing of updateRoot is dropped while keeping cross-worker storage
+// visibility through the shared trie.Database.
+func (s *StateDB) IntermediateShared_Re() error {
+	s.Finalise(false)
+	if err := s.CommitDirtyStorage(); err != nil {
+		return err
+	}
+	for addr := range s.stateObjectsPending {
+		obj := s.stateObjects[addr]
+		if obj.deleted {
+			s.deleteStateObject(obj)
+		} else {
+			s.updateStateObject(obj)
+		}
+	}
+	if len(s.stateObjectsPending) > 0 {
+		s.stateObjectsPending = make(map[common.Address]struct{})
+	}
+	return nil
 }
 
 // Prepare sets the current transaction hash and index and block hash which is

@@ -983,6 +983,138 @@ func NewLevmSpecFallbackPoolTrie(ds *DatasetReader, fromBlock, toBlock uint64, n
 	return pool, nil
 }
 
+// NewLevmSpecFallbackPoolSharedTrie creates a real-trie pool where every
+// worker's StateDB shares ONE exact trie instance over the shared trie
+// database — the vegeta-upstream "worker holds an accumulating StateDB over a
+// shared TrieDB" layout (copyStateDB[] *StateDB, all viewing the same Trie).
+//
+// Each worker's StateDB is created with state.NewWithTrie over the same trie
+// opened once from root (vmi.NewStateDBsWithSharedTrie). Writes flushed via
+// IntermediateShared are visible to all workers immediately:
+//
+//   - the account trie is the shared trie instance itself, so updateStateObject
+//     makes the new account readable by every worker;
+//   - each dirty object's storage trie is flushed into the shared
+//     trie.Database node cache (CommitDirtyStorage), so storage reads by other
+//     workers hit the new nodes.
+//
+// Workers accumulate state across txs (ReExecuteCommit never reverts); the
+// validation loop calls ResetObjectCache between txs so every tx starts from
+// the latest shared state. Concurrent writes to the shared trie are serialized
+// by trie.Trie's internal lock. Only valid when replaying with real trie
+// semantics (trieDisk mode).
+func NewLevmSpecFallbackPoolSharedTrie(ds *DatasetReader, fromBlock, toBlock uint64, n, cacheMB int) (*LevmSpecFallbackPool, error) {
+	if n <= 0 {
+		n = runtime.NumCPU()
+	}
+	txs, err := ds.LoadBlockRangeTxs(fromBlock, toBlock)
+	if err != nil {
+		return nil, fmt.Errorf("load block range txs [%d,%d]: %w", fromBlock, toBlock, err)
+	}
+	witness, err := ds.LoadBlockWitness(fromBlock)
+	if err != nil {
+		return nil, fmt.Errorf("load block witness %d: %w", fromBlock, err)
+	}
+	tmpDir, err := os.MkdirTemp("", "levm-pool-sharedtrie-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp leveldb dir: %w", err)
+	}
+	edb, err := rawdb.NewLevelDBDatabase(tmpDir, 0, 1, "")
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("open leveldb: %w", err)
+	}
+	root, err := BuildWitnessTrie(witness.Accounts, edb)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("build witness trie: %w", err)
+	}
+	sdb := vmi.NewSharedTrieDatabase(edb, cacheMB)
+
+	// Open the account trie ONCE and hand the same instance to every worker.
+	sdbs, err := vmi.NewStateDBsWithSharedTrie(root, sdb, n)
+	if err != nil {
+		_ = edb.Close()
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("create shared-trie stateDBs: %w", err)
+	}
+	pool := &LevmSpecFallbackPool{
+		workers:  make([]*LevmSpecFallback, n),
+		idle:     make(chan *LevmSpecFallback, n),
+		blockNum: fromBlock,
+		n:        n,
+		edb:      edb,
+		tmpDir:   tmpDir,
+		root:     root,
+		sdb:      sdb,
+	}
+	block := new(big.Int).SetUint64(fromBlock)
+	for i := 0; i < n; i++ {
+		lvm := levm.NewMemoryWithSharedTrie(root, sdb, edb, block, common.Address{})
+		// Rebinding the EVM to the shared-trie StateDB is what makes the
+		// worker accumulate state over the SHARED trie instance.
+		lvm.SetStateDB(sdbs[i], block, common.Address{})
+		fb := &LevmSpecFallback{
+			lvm:        lvm,
+			txs:        txs,
+			blockNum:   fromBlock,
+			noCloseEdb: true,
+		}
+		pool.workers[i] = fb
+		pool.idle <- fb
+	}
+	return pool, nil
+}
+
+// GetStateDB exposes this worker's stateDB. The shared-trie validation loop
+// needs it for snapshot/revert around ReExecuteCommit.
+func (f *LevmSpecFallback) GetStateDB() *state.StateDB {
+	if f.lvm == nil {
+		return nil
+	}
+	return f.lvm.GetStateDB()
+}
+
+// ResetObjectCache drops this worker's cached state objects so the next tx
+// re-reads the shared trie (the latest writes committed by all workers via
+// IntermediateShared). Call between txs in the shared-trie validation loop.
+func (f *LevmSpecFallback) ResetObjectCache() {
+	if sdb := f.GetStateDB(); sdb != nil {
+		sdb.ResetObjectCache()
+	}
+}
+
+// IntermediateShared flushes this worker's accumulated state into the shared
+// trie so every other worker sees it:
+//
+//   - IntermediateRoot finalises the dirty storage and writes each account
+//     into the shared account-trie instance (trie.Trie is lock-guarded, so
+//     concurrent calls from multiple workers are serialized);
+//   - CommitDirtyStorage pushes each dirty object's storage-trie nodes into
+//     the shared trie.Database node cache, making the new storage readable by
+//     other workers (which open their own storage tries from the shared root).
+//
+// Call after a tx that should be visible to other workers.
+//
+// Aligned with the vegeta-upstream IntermediateRoot_Re: the write path is now
+// Finalise + storage-commit + updateStateObject WITHOUT hashing the whole
+// account trie on every tx (IntermediateRoot's s.trie.Hash()) and WITHOUT the
+// duplicate per-object updateRoot() hashing — CommitDirtyStorage's
+// trie.Commit both lands the storage nodes in the shared trie.Database (the
+// cross-worker storage-visibility mechanism; upstream instead shares stateObject
+// instances via storeStateObj/sharedObjects) and refreshes each storageRoot.
+func (f *LevmSpecFallback) IntermediateShared() (time.Duration, error) {
+	start := time.Now()
+	sdb := f.GetStateDB()
+	if sdb == nil {
+		return 0, fmt.Errorf("LevmSpecFallback: nil stateDB")
+	}
+	if err := sdb.IntermediateShared_Re(); err != nil {
+		return time.Since(start), fmt.Errorf("LevmSpecFallback: intermediate shared: %w", err)
+	}
+	return time.Since(start), nil
+}
+
 // SetAccessLatency forwards the simulated trie cold-read latency to every
 // worker levm. Must be called after construction and before the first
 // PreExecute/ReExecute. nil disables.
@@ -990,6 +1122,12 @@ func (p *LevmSpecFallbackPool) SetAccessLatency(sim *levm.AccessLatencySimulator
 	for _, w := range p.workers {
 		w.SetAccessLatency(sim)
 	}
+}
+
+// NumWorkers returns the pool's worker count. The shared-trie validation loop
+// uses it to pin one persistent worker per goroutine across batches.
+func (p *LevmSpecFallbackPool) NumWorkers() int {
+	return p.n
 }
 
 // Acquire returns an idle LevmSpecFallback worker, blocking until one is

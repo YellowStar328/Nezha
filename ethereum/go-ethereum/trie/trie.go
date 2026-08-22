@@ -20,6 +20,7 @@ package trie
 import (
 	"bytes"
 	"fmt"
+	"sync"
 
 	"Nezha/ethereum/go-ethereum/common"
 	"Nezha/ethereum/go-ethereum/crypto"
@@ -43,8 +44,11 @@ type LeafCallback func(leaf []byte, parent common.Hash) error
 // The zero value is an empty trie with no database.
 // Use New to create a trie that sits on top of a database.
 //
-// Trie is not safe for concurrent use.
+// Trie supports concurrent reads (TryGet/Hash) and serialized writes
+// (TryUpdate/TryDelete/Commit). This allows a single Trie instance to be
+// shared across multiple StateDBs (the vegeta "shared TrieDB" layout).
 type Trie struct {
+	lock sync.RWMutex // guards root and the lazy node cache
 	db   *Database
 	root node
 }
@@ -97,11 +101,15 @@ func (t *Trie) Get(key []byte) []byte {
 // The value bytes must not be modified by the caller.
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *Trie) TryGet(key []byte) ([]byte, error) {
+	t.lock.RLock()
+	defer t.lock.RUnlock()
 	key = keybytesToHex(key)
-	value, newroot, didResolve, err := t.tryGet(t.root, key, 0)
-	if err == nil && didResolve {
-		t.root = newroot
-	}
+	// Note: the resolved lazy nodes are deliberately not written back to
+	// t.root here. When a Trie instance is shared across StateDBs, multiple
+	// readers resolve the same lazy nodes concurrently; writing t.root under
+	// RLock would race. Deep nodes are re-resolved through the (thread-safe)
+	// node cache on every read, which is cheap.
+	value, _, _, err := t.tryGet(t.root, key, 0)
 	return value, err
 }
 
@@ -162,6 +170,8 @@ func (t *Trie) Update(key, value []byte) {
 //
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *Trie) TryUpdate(key, value []byte) error {
+	t.lock.Lock()
+	defer t.lock.Unlock()
 	k := keybytesToHex(key)
 	if len(value) != 0 {
 		_, n, err := t.insert(t.root, nil, k, valueNode(value))
@@ -258,6 +268,8 @@ func (t *Trie) Delete(key []byte) {
 // TryDelete removes any existing value for key from the trie.
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *Trie) TryDelete(key []byte) error {
+	t.lock.Lock()
+	defer t.lock.Unlock()
 	k := keybytesToHex(key)
 	_, n, err := t.delete(t.root, nil, k)
 	if err != nil {
@@ -404,6 +416,8 @@ func (t *Trie) resolveHash(n hashNode, prefix []byte) (node, error) {
 // Hash returns the root hash of the trie. It does not write to the
 // database and can be used even if the trie doesn't have one.
 func (t *Trie) Hash() common.Hash {
+	t.lock.Lock()
+	defer t.lock.Unlock()
 	hash, cached, _ := t.hashRoot(nil, nil)
 	t.root = cached
 	return common.BytesToHash(hash.(hashNode))
@@ -412,6 +426,8 @@ func (t *Trie) Hash() common.Hash {
 // Commit writes all nodes to the trie's memory database, tracking the internal
 // and external (for account tries) references.
 func (t *Trie) Commit(onleaf LeafCallback) (root common.Hash, err error) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
 	if t.db == nil {
 		panic("commit called on trie with nil database")
 	}

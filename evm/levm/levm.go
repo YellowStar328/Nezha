@@ -90,6 +90,14 @@ func NewMemoryWithSharedTrie(root common.Hash, db state.Database, edb ethdb.Data
 	return &lvm
 }
 
+// SetStateDB replaces the LEVM's stateDB and rebinds the EVM to it. Used by
+// the shared-trie replay pool to bind each worker's LEVM to one StateDB of a
+// set that all share a single trie instance (vmi.NewStateDBsWithSharedTrie).
+func (lvm *LEVM) SetStateDB(sdb *state.StateDB, blockNumber *big.Int, origin common.Address) {
+	lvm.stateDB = sdb
+	lvm.NewEVM(blockNumber, origin)
+}
+
 // NewEVM creates a fresh evm instance with
 // new origin and blocknumber and time.
 // This method recreates the contained EVM while
